@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""claudet — extract thinking summaries from the current Claude Code session.
+
+Why: Ctrl+O shows only the latest summary; older ones scroll off. But they
+are persisted to ~/.claude/projects/<slug>/<id>.jsonl (inside
+message.content[].type=="thinking"). This reads them out.
+
+Usage:
+  claudet              last 10 thinking blocks, most-recent session
+  claudet N            last N (0 = all)
+  claudet -f           follow: print new blocks as they arrive
+  claudet -s PATH      explicit session file
+
+Remove with: rm ~/.local/bin/claudet
+"""
+import argparse, glob, json, os, sys, time
+
+
+def latest_session():
+    files = glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl"))
+    if not files:
+        sys.exit("claudet: no session files under ~/.claude/projects/")
+    return max(files, key=os.path.getmtime)
+
+
+def read_from(path, offset):
+    """Read thinking blocks from byte offset. Returns (blocks, new_offset)."""
+    blocks = []
+    with open(path, "rb") as f:
+        f.seek(offset)
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            for b in (ev.get("message") or {}).get("content") or []:
+                if isinstance(b, dict) and b.get("type") == "thinking":
+                    t = b.get("thinking")
+                    if t:
+                        blocks.append(t)
+        return blocks, f.tell()
+
+
+def emit(idx, text):
+    bar = "─" * 72
+    print(f"\n{bar}\n# block {idx} ({len(text)} chars)\n{bar}\n{text}")
+    sys.stdout.flush()
+
+
+def main():
+    p = argparse.ArgumentParser(prog="claudet",
+        description="Extract thinking summaries from Claude Code session logs.")
+    p.add_argument("count", nargs="?", type=int, default=10,
+                   help="recent blocks to show (0 = all, default 10)")
+    p.add_argument("-f", "--follow", action="store_true",
+                   help="print new blocks as they arrive (Ctrl+C to stop)")
+    p.add_argument("-s", "--session", metavar="PATH",
+                   help="specific session file (default: most recent)")
+    args = p.parse_args()
+
+    session = args.session or latest_session()
+    print(f"# session: {session}", file=sys.stderr)
+
+    blocks, offset = read_from(session, 0)
+
+    if args.follow:
+        for i, t in enumerate(blocks[-3:], start=max(0, len(blocks) - 3)):
+            emit(i, t)
+        print(f"\n[claudet: following {session}, Ctrl+C to stop]\n", file=sys.stderr)
+        next_idx = len(blocks)
+        try:
+            while True:
+                new_blocks, offset = read_from(session, offset)
+                for t in new_blocks:
+                    emit(next_idx, t)
+                    next_idx += 1
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            sys.exit(0)
+    else:
+        shown = blocks if args.count == 0 else blocks[-args.count:]
+        start = len(blocks) - len(shown)
+        for i, t in enumerate(shown, start=start):
+            emit(i, t)
+
+
+if __name__ == "__main__":
+    main()

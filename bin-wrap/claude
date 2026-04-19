@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  ~/.local/bin-wrap/claude — wrapper around Anthropic's Claude Code CLI
+# =============================================================================
+#
+#  PURPOSE
+#    Re-enables the extended-thinking *summary display* in interactive
+#    Claude Code sessions by appending `--thinking-display summarized`
+#    to every invocation of claude.
+#
+#  WHY THIS WRAPPER EXISTS
+#    As of Claude Code v2.1.114 (April 2026) the documented setting
+#        "showThinkingSummaries": true
+#    in ~/.claude/settings.json is silently ignored — an upstream bug.
+#    The feature moved to an undocumented CLI flag (`--thinking-display`)
+#    and no environment-variable equivalent exists. A plain shell alias
+#    would work today but break hard if the flag is ever renamed or
+#    removed. This wrapper probes the flag once per installed version,
+#    caches the result, and drops the flag automatically if a future
+#    release stops accepting it — so claude still launches either way.
+#
+#  WHY THIS LIVES IN ~/.local/bin-wrap/ AND NOT ~/.local/bin/
+#    ~/.local/bin/claude is a symlink maintained by Claude Code itself:
+#    when we delete or overwrite it, a running claude process (or the
+#    installer) silently re-creates the symlink, wiping out any wrapper
+#    placed there. So we place the wrapper in a DEDICATED directory that
+#    Claude Code never touches, and prepend it to PATH via your shell's
+#    rc file (~/.bashrc for bash, ~/.zshrc for zsh):
+#
+#        export PATH="$HOME/.local/bin-wrap:$HOME/.local/bin:$PATH"
+#
+#    The install.sh in this repo appends this line automatically.
+#
+#    The shebang is `/usr/bin/env bash`, so this script runs under bash
+#    regardless of your interactive shell. On macOS, the stock bash 3.2
+#    is sufficient — no bash-4+ features are used.
+#
+#  WHEN THE FLAG IS REJECTED
+#    The wrapper keeps a two-line cache at
+#        ~/.cache/claude-wrapper.flag
+#    shaped as:  <version>\n<ok|no>\n
+#    On a version change, it reprobes `<claude> --thinking-display
+#    summarized --help` (cheap — doesn't launch the full app). If the
+#    probe fails, the wrapper invokes claude WITHOUT the flag and prints
+#    a clear warning to stderr so the user knows the wrapper has outlived
+#    its usefulness.
+#
+#  WHEN TO REMOVE THIS WRAPPER
+#    Remove it if ANY of the following becomes true:
+#      (a) `showThinkingSummaries: true` in settings.json takes effect
+#          again — check the Claude Code changelog.
+#      (b) You see the "flag rejected" warning on stderr — the flag is
+#          gone and this wrapper is doing nothing useful.
+#      (c) A stable, documented env var or settings key replaces the
+#          current flag-based workaround.
+#
+#    Removal procedure: run `./uninstall.sh` from the claude-code-extras
+#    checkout, or manually:
+#        rm ~/.local/bin-wrap/claude
+#        rmdir ~/.local/bin-wrap 2>/dev/null
+#        rm -f ~/.cache/claude-wrapper.flag
+#        # Remove the block between the claude-code-extras marker lines
+#        # from your shell rc (~/.bashrc or ~/.zshrc).
+#
+#  TROUBLESHOOTING
+#    "real claude binary not found"
+#        → All three lookup methods failed: PATH walk, ~/.local/bin/claude
+#          symlink, and ~/.local/share/claude/versions/. Reinstall Claude
+#          Code (`claude install`) or check `ls ~/.local/share/claude/versions/`.
+#
+#    "flag rejected"
+#        → Anthropic renamed or removed `--thinking-display`. Read the
+#          Claude Code changelog and either update this wrapper with the
+#          new flag name, or remove it (see "WHEN TO REMOVE" above).
+#
+#    Stuck cache / wrong probe result
+#        → rm ~/.cache/claude-wrapper.flag
+#          The next invocation will re-probe cleanly.
+#
+#    Wrapper runs but summaries still don't appear
+#        → The flag may have become a no-op while still being accepted.
+#          Check the changelog; if so, remove the wrapper (case b above).
+#
+#    `which claude` points to ~/.local/bin/claude (not the wrapper)
+#        → PATH isn't set up. Check that your shell rc (~/.bashrc or
+#          ~/.zshrc) contains the block added by install.sh, then source
+#          it (`source ~/.bashrc` / `source ~/.zshrc`) or open a fresh
+#          terminal. Run `hash -r` to clear the path cache.
+#
+# =============================================================================
+
+set -euo pipefail
+
+# ---- 1. Locate the real claude binary ---------------------------------------
+# Three lookup methods, tried in order, so the wrapper works in any calling
+# context (interactive shell, script, ssh non-interactive, cron, systemd,
+# launchd):
+#
+#   a) Walk PATH with `type -aP claude`, skipping ourselves.
+#      Canonical when PATH is set up (interactive shell). Covers the common
+#      case and also handles oddball installs where claude isn't under
+#      ~/.local/bin.
+#
+#   b) Canonical native-install symlink at ~/.local/bin/claude.
+#      Claude Code maintains this symlink itself, so it's the most reliable
+#      pointer to the current version — but it's only reached by (a) if the
+#      caller's PATH happens to include ~/.local/bin.
+#
+#   c) Pick the newest file in ~/.local/share/claude/versions/.
+#      Last-resort fallback if the symlink is missing (e.g., mid-update).
+#      Uses numeric dotted-version sort so 2.1.10 beats 2.1.9 correctly.
+self=$(readlink -f "$0")
+real=""
+
+# (a) PATH-based lookup.
+while IFS= read -r candidate; do
+  if [[ -x $candidate ]] && [[ "$(readlink -f "$candidate")" != "$self" ]]; then
+    real=$candidate
+    break
+  fi
+done < <(type -aP claude)
+
+# (b) Well-known symlink fallback.
+if [[ -z $real ]] && [[ -x "$HOME/.local/bin/claude" ]]; then
+  if [[ "$(readlink -f "$HOME/.local/bin/claude")" != "$self" ]]; then
+    real="$HOME/.local/bin/claude"
+  fi
+fi
+
+# (c) Versions-dir fallback.
+if [[ -z $real ]]; then
+  versions_dir="$HOME/.local/share/claude/versions"
+  if [[ -d $versions_dir ]]; then
+    latest=$(ls -1 "$versions_dir" 2>/dev/null \
+      | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)
+    if [[ -n $latest ]] && [[ -x "$versions_dir/$latest" ]]; then
+      real="$versions_dir/$latest"
+    fi
+  fi
+fi
+
+if [[ -z $real ]]; then
+  {
+    echo "claude wrapper: real claude binary not found."
+    echo "claude wrapper: tried PATH, ~/.local/bin/claude, and ~/.local/share/claude/versions/."
+    echo "claude wrapper: this wrapper is at $self"
+    echo "claude wrapper: PATH is: $PATH"
+    echo "claude wrapper: run 'claude install' to reinstall Claude Code,"
+    echo "claude wrapper: or 'rm $self' to delete this wrapper."
+  } >&2
+  exit 127
+fi
+
+# ---- 2. Probe whether --thinking-display is accepted ------------------------
+# Cached by version string: we reprobe only when claude is updated.
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/claude-wrapper.flag"
+version=$("$real" --version 2>/dev/null || echo "unknown")
+
+cached_version=""
+cached_result=""
+if [[ -f $cache ]]; then
+  cached_version=$(sed -n '1p' "$cache" 2>/dev/null || true)
+  cached_result=$(sed -n '2p' "$cache" 2>/dev/null || true)
+fi
+
+if [[ $cached_version != "$version" ]]; then
+  mkdir -p "$(dirname "$cache")"
+  if "$real" --thinking-display summarized --help >/dev/null 2>&1; then
+    printf '%s\nok\n' "$version" > "$cache"
+    cached_result=ok
+  else
+    printf '%s\nno\n' "$version" > "$cache"
+    cached_result=no
+    # Fire the warning *only* on the probe — once per version change, not
+    # on every invocation. Points the user at this file's header so they
+    # can understand and decide what to do.
+    {
+      echo "claude wrapper: '--thinking-display summarized' was rejected by claude $version."
+      echo "claude wrapper: launching without the flag; thinking summaries will NOT be shown."
+      echo "claude wrapper: this wrapper is probably obsolete — see the header of"
+      echo "claude wrapper:   $self"
+      echo "claude wrapper: for removal instructions."
+    } >&2
+  fi
+fi
+
+# ---- 3. Forward to the real claude ------------------------------------------
+# `exec` replaces this shell with claude, so signals, exit code, job control
+# and the TUI all behave exactly as if the wrapper wasn't there.
+if [[ $cached_result == ok ]]; then
+  exec "$real" --thinking-display summarized "$@"
+else
+  exec "$real" "$@"
+fi
