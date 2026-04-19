@@ -12,6 +12,9 @@ This repo bundles:
 - a **`claudet`** command that pulls thinking blocks out of the current
   session's JSONL log — because the TUI's Ctrl+O only shows the most recent
   one, and older summaries are overwritten as new ones stream in;
+- a **statusline** that renders cwd, model, context-window usage with a
+  progress bar, git ahead/behind vs. main, and a clock (install is opt-out
+  via `--no-statusline`);
 - an idempotent **`install.sh`** / **`uninstall.sh`** pair that's safe to
   run on a machine with an existing Claude Code setup.
 
@@ -37,8 +40,10 @@ claudet 5             # last 5 thinking blocks from your most recent session
 | `~/.local/bin/claudet` | python3 script: extracts thinking blocks from the latest session JSONL | whenever the wrapper is removed |
 | PATH block in your shell rc | prepends `~/.local/bin-wrap` and `~/.local/bin` | framed by sentinel markers so `uninstall.sh` can remove it cleanly |
 | `~/.cache/claude-wrapper.flag` | per-version cache of the flag probe result | auto-regenerates; safe to delete anytime |
+| `~/.claude/statusline-command.sh` *(unless `--no-statusline`)* | renders cwd, model, context-window bar, git +/- vs main, clock | remove with `./uninstall.sh`, or pass `--no-statusline` to skip on install |
+| `statusLine` block in `~/.claude/settings.json` *(unless `--no-statusline`)* | points CC at the statusline script, 2-second refresh | `uninstall.sh` only removes it if the `command` value is the one we wrote — user-customized statusLines are left alone |
 
-Nothing under `~/.claude/` is touched.
+Nothing else under `~/.claude/` is touched.
 
 ## claudet usage
 

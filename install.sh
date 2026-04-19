@@ -26,27 +26,35 @@ set -euo pipefail
 FORCE=0
 DRY_RUN=0
 RC_OVERRIDE=""
+INSTALL_STATUSLINE=1
 
 usage() {
   cat <<EOF
-usage: $(basename "$0") [-f] [-n] [--rc FILE] [-h]
+usage: $(basename "$0") [-f] [-n] [--no-statusline] [--rc FILE] [-h]
 
 Install the Claude Code thinking-summary wrapper and claudet helper.
 
+By default also installs the statusline script into ~/.claude/ and merges
+a statusLine block into ~/.claude/settings.json (non-destructive: skipped
+if already configured, unless --force).
+
 Options:
-  -f, --force       Overwrite existing installed files (with .bak backup).
-  -n, --dry-run     Show actions without making changes.
-      --rc FILE     Shell rc file to modify (default: autodetected from \$SHELL).
-  -h, --help        Show this help and exit.
+  -f, --force          Overwrite existing installed files + settings keys
+                       (with .bak backups).
+  -n, --dry-run        Show actions without making changes.
+      --no-statusline  Skip the statusline script + settings merge.
+      --rc FILE        Shell rc file to modify (default: autodetected from \$SHELL).
+  -h, --help           Show this help and exit.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -f|--force)   FORCE=1; shift ;;
-    -n|--dry-run) DRY_RUN=1; shift ;;
-    --rc)         RC_OVERRIDE=${2:-}; shift 2 ;;
-    -h|--help)    usage; exit 0 ;;
+    -f|--force)       FORCE=1; shift ;;
+    -n|--dry-run)     DRY_RUN=1; shift ;;
+    --no-statusline)  INSTALL_STATUSLINE=0; shift ;;
+    --rc)             RC_OVERRIDE=${2:-}; shift 2 ;;
+    -h|--help)        usage; exit 0 ;;
     *) echo "install.sh: unknown argument '$1'" >&2; usage >&2; exit 2 ;;
   esac
 done
@@ -118,6 +126,23 @@ install_file() {
 
 install_file "$BIN_WRAP_SRC" "$BIN_WRAP_DEST"
 install_file "$CLAUDET_SRC" "$CLAUDET_DEST"
+
+# ---- optional: statusline script + settings.json merge ---------------------
+if (( INSTALL_STATUSLINE )); then
+  STATUSLINE_SRC="$REPO_DIR/share/statusline-command.sh"
+  STATUSLINE_DEST="$HOME/.claude/statusline-command.sh"
+  SETTINGS="$HOME/.claude/settings.json"
+  # Use an absolute path (expanded at install time) so we don't depend on
+  # whether Claude Code performs shell-variable expansion on statusLine.command.
+  STATUSLINE_CMD="bash $HOME/.claude/statusline-command.sh"
+
+  install_file "$STATUSLINE_SRC" "$STATUSLINE_DEST"
+
+  merge_args=(add-statusline --settings "$SETTINGS" --command "$STATUSLINE_CMD" --refresh 2)
+  (( FORCE ))   && merge_args+=(--force)
+  (( DRY_RUN )) && merge_args+=(--dry-run)
+  python3 "$REPO_DIR/tools/settings.py" "${merge_args[@]}"
+fi
 
 # ---- rc-file modification ---------------------------------------------------
 rc_block() {
