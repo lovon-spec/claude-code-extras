@@ -1,29 +1,159 @@
 #!/usr/bin/env python3
-"""claudet — extract thinking summaries from the current Claude Code session.
+"""claudet — extract thinking summaries from a Claude Code session.
 
 Why: Ctrl+O shows only the latest summary; older ones scroll off. But they
 are persisted to ~/.claude/projects/<slug>/<id>.jsonl (inside
 message.content[].type=="thinking"). This reads them out.
 
+Session resolution:
+  By default, claudet walks its parent-process tree to find the nearest
+  claude ancestor, then looks up that pid in ~/.cache/claude-sessions/,
+  which the statusline script writes on every refresh. That pins claudet
+  to the session of whichever tab invoked it.
+
+  If auto-detection fails (not running inside claude, or the statusline
+  hasn't ticked yet in a brand-new tab), claudet lists the live sessions
+  it knows about and asks you to pick with -s — it never silently falls
+  back to "most recent globally".
+
 Usage:
-  claudet              last 10 thinking blocks, most-recent session
+  claudet              last 10 thinking blocks, auto-detected session
   claudet N            last N (0 = all)
   claudet -f           follow: print new blocks as they arrive
-  claudet -s PATH      explicit session file
+  claudet -s SPEC      session selector: full path, UUID, or UUID prefix
+                       (on prefix collision, picks most-recent-by-mtime)
 
 Remove with: rm ~/.local/bin/claudet
 """
-import argparse, glob, json, os, sys, time
+import argparse, glob, json, os, subprocess, sys, time
 
 
-def latest_session():
-    files = glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl"))
-    if not files:
-        sys.exit("claudet: no session files under ~/.claude/projects/")
-    return max(files, key=os.path.getmtime)
+# --------------------------------------------------------------------------
+# Session resolution
+# --------------------------------------------------------------------------
+
+def _cache_dir():
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return os.path.join(base, "claude-sessions")
 
 
-def read_from(path, offset):
+def _ps_field(pid, field):
+    """Return a single `ps -o <field>=` value for pid, or empty string."""
+    try:
+        out = subprocess.check_output(
+            ["ps", "-o", f"{field}=", "-p", str(pid)],
+            stderr=subprocess.DEVNULL,
+        )
+        return out.strip().decode().strip()
+    except Exception:
+        return ""
+
+
+def _parent_claude_pid():
+    """Walk parents; return the pid of the nearest ancestor whose comm is
+    `claude`, or None. Portable across Linux/macOS via `ps`."""
+    pid = os.getpid()
+    for _ in range(20):  # safety bound
+        ppid_str = _ps_field(pid, "ppid")
+        try:
+            ppid = int(ppid_str)
+        except ValueError:
+            return None
+        if ppid <= 1:
+            return None
+        comm = _ps_field(ppid, "comm").rsplit("/", 1)[-1]
+        if comm == "claude":
+            return ppid
+        pid = ppid
+    return None
+
+
+def _session_from_cache(pid):
+    """Read ~/.cache/claude-sessions/<pid> -> transcript path, or None."""
+    if pid is None:
+        return None
+    entry = os.path.join(_cache_dir(), str(pid))
+    if not os.path.isfile(entry):
+        return None
+    try:
+        path = open(entry).read().strip()
+    except OSError:
+        return None
+    return path if path and os.path.exists(path) else None
+
+
+def _live_sessions():
+    """List (short_id, transcript_path) for each valid cache entry."""
+    d = _cache_dir()
+    if not os.path.isdir(d):
+        return []
+    seen = set()
+    out = []
+    for entry in sorted(os.listdir(d)):
+        full = os.path.join(d, entry)
+        if not os.path.isfile(full):
+            continue
+        try:
+            path = open(full).read().strip()
+        except OSError:
+            continue
+        if not path or not os.path.exists(path) or path in seen:
+            continue
+        seen.add(path)
+        base = os.path.basename(path)
+        sid_short = base[:8]
+        out.append((sid_short, path))
+    return out
+
+
+def _resolve_session_spec(spec):
+    """Resolve -s: absolute path wins; else glob for UUID/prefix under
+    ~/.claude/projects/*/. Pick most-recent-by-mtime on collision."""
+    if os.path.exists(spec):
+        return spec
+    pattern = os.path.expanduser(f"~/.claude/projects/*/{spec}*.jsonl")
+    matches = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    if not matches:
+        sys.exit(f"claudet: no session matching '{spec}'")
+    if len(matches) > 1:
+        print(
+            f"# {len(matches)} sessions matched '{spec}'; using most-recent-by-mtime: {matches[0]}",
+            file=sys.stderr,
+        )
+    return matches[0]
+
+
+def _helpful_fail():
+    sessions = _live_sessions()
+    lines = ["claudet: couldn't auto-detect your session."]
+    if sessions:
+        lines.append("Live sessions I know about:")
+        for sid, path in sessions:
+            lines.append(f"  {sid}  {path}")
+        lines.append("Pass -s <prefix> to pick, or wait ~2s if this tab just opened.")
+    else:
+        lines.append(
+            "(No live sessions tracked — if this tab just opened, wait ~2s "
+            "for the statusline to tick.)"
+        )
+        lines.append("Pass -s <prefix> to target a session explicitly.")
+    sys.exit("\n".join(lines))
+
+
+def _resolve_session(explicit_spec):
+    if explicit_spec:
+        return _resolve_session_spec(explicit_spec)
+    path = _session_from_cache(_parent_claude_pid())
+    if path:
+        return path
+    _helpful_fail()
+
+
+# --------------------------------------------------------------------------
+# Reading thinking blocks
+# --------------------------------------------------------------------------
+
+def _read_from(path, offset):
     """Read thinking blocks from byte offset. Returns (blocks, new_offset)."""
     blocks = []
     with open(path, "rb") as f:
@@ -41,11 +171,15 @@ def read_from(path, offset):
         return blocks, f.tell()
 
 
-def emit(idx, text):
+def _emit(idx, text):
     bar = "─" * 72
     print(f"\n{bar}\n# block {idx} ({len(text)} chars)\n{bar}\n{text}")
     sys.stdout.flush()
 
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
 
 def main():
     p = argparse.ArgumentParser(prog="claudet",
@@ -54,25 +188,25 @@ def main():
                    help="recent blocks to show (0 = all, default 10)")
     p.add_argument("-f", "--follow", action="store_true",
                    help="print new blocks as they arrive (Ctrl+C to stop)")
-    p.add_argument("-s", "--session", metavar="PATH",
-                   help="specific session file (default: most recent)")
+    p.add_argument("-s", "--session", metavar="SPEC",
+                   help="session selector: path, full UUID, or UUID prefix")
     args = p.parse_args()
 
-    session = args.session or latest_session()
+    session = _resolve_session(args.session)
     print(f"# session: {session}", file=sys.stderr)
 
-    blocks, offset = read_from(session, 0)
+    blocks, offset = _read_from(session, 0)
 
     if args.follow:
         for i, t in enumerate(blocks[-3:], start=max(0, len(blocks) - 3)):
-            emit(i, t)
+            _emit(i, t)
         print(f"\n[claudet: following {session}, Ctrl+C to stop]\n", file=sys.stderr)
         next_idx = len(blocks)
         try:
             while True:
-                new_blocks, offset = read_from(session, offset)
+                new_blocks, offset = _read_from(session, offset)
                 for t in new_blocks:
-                    emit(next_idx, t)
+                    _emit(next_idx, t)
                     next_idx += 1
                 time.sleep(0.5)
         except KeyboardInterrupt:
@@ -81,7 +215,7 @@ def main():
         shown = blocks if args.count == 0 else blocks[-args.count:]
         start = len(blocks) - len(shown)
         for i, t in enumerate(shown, start=start):
-            emit(i, t)
+            _emit(i, t)
 
 
 if __name__ == "__main__":

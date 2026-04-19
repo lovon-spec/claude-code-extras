@@ -48,17 +48,35 @@ Nothing else under `~/.claude/` is touched.
 ## claudet usage
 
 ```bash
-claudet              # last 10 thinking blocks (most recent session)
+claudet              # last 10 thinking blocks from *this tab's* session
 claudet N            # last N blocks
 claudet 0            # all blocks in the session
 claudet -f           # follow mode: stream new blocks as they arrive
-claudet -s PATH      # specific session file
+claudet -s SPEC      # session selector: path, full UUID, or UUID prefix
 claudet -h           # help
 ```
 
 Follow mode is the intended workflow for Claude Code's Ctrl+O overwrite
 behavior: leave `claudet -f` running in a side pane, and every summary
 scrolls past in a durable, scrollable buffer.
+
+### Session auto-detection (multi-tab safe)
+
+The statusline script writes each live session's transcript path to
+`~/.cache/claude-sessions/<claude-pid>` on every refresh. `claudet` walks
+its own parent process tree, finds the nearest `claude` ancestor, and
+looks up that pid's cache entry — so `!claudet` from any tab targets
+*that tab's* session, regardless of which other tabs are active.
+
+If auto-detection fails (not running inside claude, or a brand-new tab
+whose statusline hasn't ticked yet), `claudet` lists the live sessions
+it knows about and asks you to pick with `-s <prefix>`. It never
+silently falls back to "most recent globally" — a wrong session is more
+confusing than a clear failure.
+
+The statusline also shows the first 8 chars of the session id at the end
+of the line, so you can visually distinguish tabs and have a reference
+for `-s` on the rare cold-start race.
 
 ## Installer behavior
 
