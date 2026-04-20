@@ -80,9 +80,24 @@ if [ -n "$used_pct" ]; then
   pct_display=$(echo "$used_pct" | awk '{printf "%.0f%%", $1}')
 fi
 
+# --- Dirty worktree (computed early so the ●N can sit right after cwd) ----
+# `git status --porcelain` returns empty outside a git worktree, which the
+# `-n "$dirty"` guard below silently handles. --no-optional-locks keeps the
+# read from fighting concurrent git activity over the index lock every 2s.
+dirty=$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)
+if [ -n "$dirty" ]; then
+  dirty_count=$(printf '%s' "$dirty" | grep -c .)
+fi
+
 # --- Render ----------------------------------------------------------------
-printf '\033[01;32m%s@%s\033[00m:\033[01;34m%s\033[00m \033[00;35m[%s]\033[00m' \
-  "$(whoami)" "$(hostname -s)" "$cwd" "$model"
+printf '\033[01;32m%s@%s\033[00m:\033[01;34m%s\033[00m' \
+  "$(whoami)" "$(hostname -s)" "$cwd"
+
+if [ -n "$dirty" ]; then
+  printf ' \033[00;33m●%s\033[00m' "$dirty_count"
+fi
+
+printf ' \033[00;35m[%s]\033[00m' "$model"
 
 if [ -n "$used_pct" ]; then
   printf ' \033[00;36m%s\033[00m \033[00;33m%s\033[00m' "$bar" "$pct_display"
@@ -197,15 +212,6 @@ if [ -n "$git_info" ]; then
     fi
   fi
 
-  # Dirty worktree indicator — ●N (yellow) where N is the number of
-  # modified/staged/untracked paths. Hidden when clean.
-  # --no-optional-locks so concurrent git activity in the same worktree
-  # doesn't fight over the index lock every 2s.
-  dirty=$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)
-  if [ -n "$dirty" ]; then
-    dirty_count=$(printf '%s' "$dirty" | grep -c .)
-    printf ' \033[00;33m●%s\033[00m' "$dirty_count"
-  fi
 fi
 
 printf ' \033[00;90m%s\033[00m' "$(date '+%Y-%m-%d %H:%M:%S')"
