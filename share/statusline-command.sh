@@ -127,8 +127,17 @@ if [ -n "$git_info" ]; then
   fi
 
   if [ -n "$main_branch" ]; then
-    ahead=$(git -C "$cwd" rev-list --count "$main_branch..HEAD" 2>/dev/null)
-    behind=$(git -C "$cwd" rev-list --count "HEAD..$main_branch" 2>/dev/null)
+    # Prefer origin/<primary> as the comparison ref — local <primary> often
+    # lags behind what's actually on the remote (common case: new worktree
+    # created from origin/main while local main hasn't been pulled in a
+    # while). Fall back to local <primary> for repos without an origin.
+    if git -C "$cwd" rev-parse --verify --quiet "origin/$main_branch" >/dev/null 2>&1; then
+      primary_ref="origin/$main_branch"
+    else
+      primary_ref="$main_branch"
+    fi
+    ahead=$(git -C "$cwd" rev-list --count "$primary_ref..HEAD" 2>/dev/null)
+    behind=$(git -C "$cwd" rev-list --count "HEAD..$primary_ref" 2>/dev/null)
     if [ -n "$ahead" ] && [ -n "$behind" ]; then
       printf ' \033[00;32m+%s\033[00m/\033[00;31m-%s\033[00m' "$ahead" "$behind"
 
@@ -159,14 +168,14 @@ if [ -n "$git_info" ]; then
 
         if [ "$modern" = "1" ]; then
           head_sha=$(git -C "$cwd" rev-parse HEAD 2>/dev/null)
-          main_sha=$(git -C "$cwd" rev-parse "$main_branch" 2>/dev/null)
+          main_sha=$(git -C "$cwd" rev-parse "$primary_ref" 2>/dev/null)
           merge_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline-merge"
           mkdir -p "$merge_cache_dir"
           merge_cache_file="$merge_cache_dir/${head_sha}-${main_sha}"
           if [ -f "$merge_cache_file" ]; then
             state=$(cat "$merge_cache_file")
           else
-            if git -C "$cwd" merge-tree --write-tree HEAD "$main_branch" \
+            if git -C "$cwd" merge-tree --write-tree HEAD "$primary_ref" \
                  >/dev/null 2>&1; then
               state=clean
             else
