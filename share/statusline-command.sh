@@ -163,6 +163,34 @@ if [ -n "$git_info" ]; then
       fi
     fi
   fi
+
+  # --- Unpushed indicators (fetch-free; uses locally-cached upstream refs) --
+  # Two separate counts, any or both can appear:
+  #   ⇡N             — current branch has N commits past its upstream
+  #                    (only meaningful if the branch has an upstream set;
+  #                     worktree branches typically don't, so this hides)
+  #   <primary>⇡M    — primary branch has M commits past its upstream,
+  #                    shown only when the current branch is not the primary
+  #                    (avoids double-counting when you're on main itself)
+  current_branch=$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+  if git -C "$cwd" rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
+    cur_unpushed=$(git -C "$cwd" rev-list --count '@{upstream}..HEAD' 2>/dev/null)
+    if [ -n "$cur_unpushed" ] && [ "$cur_unpushed" -gt 0 ]; then
+      printf ' \033[00;36m⇡%s\033[00m' "$cur_unpushed"
+    fi
+  fi
+
+  if [ -n "$main_branch" ] && [ "$current_branch" != "$main_branch" ]; then
+    if git -C "$cwd" rev-parse --abbrev-ref "${main_branch}@{upstream}" \
+         >/dev/null 2>&1; then
+      pri_unpushed=$(git -C "$cwd" rev-list --count \
+        "${main_branch}@{upstream}..${main_branch}" 2>/dev/null)
+      if [ -n "$pri_unpushed" ] && [ "$pri_unpushed" -gt 0 ]; then
+        printf ' \033[00;36m%s⇡%s\033[00m' "$main_branch" "$pri_unpushed"
+      fi
+    fi
+  fi
 fi
 
 printf ' \033[00;90m%s\033[00m' "$(date '+%Y-%m-%d %H:%M:%S')"
