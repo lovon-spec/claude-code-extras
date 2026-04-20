@@ -196,6 +196,15 @@ if [ -n "$git_info" ]; then
       fi
     fi
   fi
+
+  # Dirty worktree indicator — ● (yellow) when there are uncommitted changes
+  # (modified, staged, or untracked). Hidden when clean. Uses
+  # --no-optional-locks so concurrent git activity in the same worktree
+  # doesn't fight over the index lock every 2s.
+  dirty=$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)
+  if [ -n "$dirty" ]; then
+    printf ' \033[00;33m●\033[00m'
+  fi
 fi
 
 printf ' \033[00;90m%s\033[00m' "$(date '+%Y-%m-%d %H:%M:%S')"
