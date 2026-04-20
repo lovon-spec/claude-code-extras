@@ -13,8 +13,10 @@ This repo bundles:
   session's JSONL log — because the TUI's Ctrl+O only shows the most recent
   one, and older summaries are overwritten as new ones stream in;
 - a **statusline** that renders cwd, model, context-window usage with a
-  progress bar, git ahead/behind vs. main, and a clock (install is opt-out
-  via `--no-statusline`);
+  progress bar, git ahead/behind vs. the primary branch, a **merge
+  preview** (✓ clean / ⚠ would conflict) cached by commit SHA, a clock,
+  and the first 8 chars of the session id (install is opt-out via
+  `--no-statusline`);
 - an idempotent **`install.sh`** / **`uninstall.sh`** pair that's safe to
   run on a machine with an existing Claude Code setup.
 
@@ -105,6 +107,11 @@ is removed. `~/.local/bin-wrap/` is removed only if it's empty.
 - bash (any version ≥ 3.2 — macOS stock bash is fine)
 - python3 (for `claudet`)
 - `readlink -f` (present on Linux, and on macOS 12.3+)
+- jq (used by the statusline; pre-installed on macOS, `apt install jq` on Debian/Ubuntu)
+- **git ≥ 2.38** for the statusline's merge-preview indicator (`⚠` / `✓`).
+  Older git silently skips the feature and shows just `+N/-M`. Debian 12
+  and macOS Ventura (13) and later ship a new-enough git; Debian 11 does
+  not. Everything else works on any git.
 - Claude Code installed via the native installer (the wrapper's fallback
   logic expects `~/.local/share/claude/versions/<ver>`). Homebrew / npm
   installs will work through PATH-based lookup but haven't been tested.

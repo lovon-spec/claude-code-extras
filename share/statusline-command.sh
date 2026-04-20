@@ -88,13 +88,75 @@ if [ -n "$used_pct" ]; then
   printf ' \033[00;36m%s\033[00m \033[00;33m%s\033[00m' "$bar" "$pct_display"
 fi
 
-# Git ahead/behind relative to main
+# --- Git ahead/behind + merge-preview vs the primary branch ----------------
+# Probes the branch name in priority order: origin's default (if set) → main
+# → master. Skips silently if none found.
+#
+# When both ahead > 0 and behind > 0, additionally previews whether merging
+# the primary branch in would conflict. Uses `git merge-tree --write-tree`
+# (git ≥ 2.38) which runs the 3-way merge in memory — no touching of the
+# working tree or index. The result is cached by (HEAD-sha, main-sha) so
+# the expensive merge is only run when something actually moves.
 git_info=$(git -C "$cwd" rev-parse --git-dir 2>/dev/null)
 if [ -n "$git_info" ]; then
-  ahead=$(git -C "$cwd" rev-list --no-walk --count main..HEAD 2>/dev/null)
-  behind=$(git -C "$cwd" rev-list --no-walk --count HEAD..main 2>/dev/null)
-  if [ -n "$ahead" ] && [ -n "$behind" ]; then
-    printf ' \033[00;32m+%s\033[00m/\033[00;31m-%s\033[00m' "$ahead" "$behind"
+  # Detect the primary branch.
+  main_branch=$(git -C "$cwd" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)
+  main_branch=${main_branch#origin/}
+  if [ -z "$main_branch" ]; then
+    for b in main master; do
+      if git -C "$cwd" show-ref --verify --quiet "refs/heads/$b"; then
+        main_branch=$b
+        break
+      fi
+    done
+  fi
+
+  if [ -n "$main_branch" ]; then
+    ahead=$(git -C "$cwd" rev-list --count "$main_branch..HEAD" 2>/dev/null)
+    behind=$(git -C "$cwd" rev-list --count "HEAD..$main_branch" 2>/dev/null)
+    if [ -n "$ahead" ] && [ -n "$behind" ]; then
+      printf ' \033[00;32m+%s\033[00m/\033[00;31m-%s\033[00m' "$ahead" "$behind"
+
+      # Merge preview — only meaningful when both sides have commits.
+      if [ "$ahead" -gt 0 ] && [ "$behind" -gt 0 ]; then
+        # Gate on git >= 2.38 (modern `merge-tree --write-tree` syntax).
+        git_ver=$(git --version 2>/dev/null | awk '{print $3}' | head -1)
+        git_major=${git_ver%%.*}
+        _rest=${git_ver#*.}
+        git_minor=${_rest%%.*}
+        modern=0
+        case "$git_major" in ''|*[!0-9]*) : ;; *)
+          if [ "$git_major" -gt 2 ] 2>/dev/null; then
+            modern=1
+          elif [ "$git_major" -eq 2 ] && [ "$git_minor" -ge 38 ] 2>/dev/null; then
+            modern=1
+          fi
+        ;; esac
+
+        if [ "$modern" = "1" ]; then
+          head_sha=$(git -C "$cwd" rev-parse HEAD 2>/dev/null)
+          main_sha=$(git -C "$cwd" rev-parse "$main_branch" 2>/dev/null)
+          merge_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline-merge"
+          mkdir -p "$merge_cache_dir"
+          merge_cache_file="$merge_cache_dir/${head_sha}-${main_sha}"
+          if [ -f "$merge_cache_file" ]; then
+            state=$(cat "$merge_cache_file")
+          else
+            if git -C "$cwd" merge-tree --write-tree HEAD "$main_branch" \
+                 >/dev/null 2>&1; then
+              state=clean
+            else
+              state=conflict
+            fi
+            printf '%s' "$state" > "$merge_cache_file"
+          fi
+          case "$state" in
+            clean)    printf ' \033[00;32m✓\033[00m' ;;
+            conflict) printf ' \033[01;31m⚠\033[00m' ;;
+          esac
+        fi
+      fi
+    fi
   fi
 fi
 
