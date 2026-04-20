@@ -117,11 +117,15 @@ if [ -n "$git_info" ]; then
     if [ -n "$ahead" ] && [ -n "$behind" ]; then
       printf ' \033[00;32m+%s\033[00m/\033[00;31m-%s\033[00m' "$ahead" "$behind"
 
-      # Pull preview: is merging the primary branch IN safe?
-      #   ahead=0, behind>0  → fast-forward (provably clean, no merge-tree)
-      #   ahead>0, behind>0  → 3-way merge, ask merge-tree
-      #   behind=0           → nothing to pull, no indicator
-      if [ "$behind" -gt 0 ] && [ "$ahead" -eq 0 ]; then
+      # Merge-parity indicator: are HEAD and the primary branch mergeable?
+      # Fires whenever the two diverge at all; the ✓/⚠ is symmetric — it
+      # says nothing about direction, only whether a merge between them
+      # would conflict.
+      #   ahead=0, behind=0  → identical, no indicator
+      #   ahead=0 XOR behind=0 → fast-forward in one direction, ✓ (trivial)
+      #   ahead>0 AND behind>0 → real 3-way merge, ask merge-tree
+      if { [ "$ahead" -gt 0 ] && [ "$behind" -eq 0 ]; } \
+         || { [ "$ahead" -eq 0 ] && [ "$behind" -gt 0 ]; }; then
         printf ' \033[00;32m✓\033[00m'
       elif [ "$ahead" -gt 0 ] && [ "$behind" -gt 0 ]; then
         # Gate on git >= 2.38 (modern `merge-tree --write-tree` syntax).
