@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; }
+  body {
+    background: #1a1d1f;
+    color: #d6d6d6;
+    font-family: 'DejaVu Sans Mono', 'Liberation Mono', monospace;
+    padding: 36px 36px 28px 36px;
+    margin: 0;
+    width: 1400px;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 500;
+    margin: 0 0 18px 0;
+    color: #aaa;
+    font-family: 'DejaVu Sans', sans-serif;
+  }
+  .terminal {
+    background: #000;
+    border-radius: 8px;
+    padding: 16px 22px;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.4);
+    font-size: 16px;
+    line-height: 1.5;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .statusline { letter-spacing: 0; }
+  .green { color: #5af78e; }
+  .green-b { color: #5af78e; font-weight: bold; }
+  .red { color: #ff6e67; }
+  .red-b { color: #ff6e67; font-weight: bold; }
+  .blue { color: #57c7ff; font-weight: bold; }
+  .magenta { color: #c39bff; }
+  .cyan { color: #9aedfe; }
+  .yellow { color: #f3f99d; }
+  .dim { color: #777; }
+  .legend {
+    margin-top: 36px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 36px;
+    font-family: 'DejaVu Sans', sans-serif;
+    font-size: 14px;
+    color: #ccc;
+  }
+  .legend .row {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 16px;
+    align-items: baseline;
+  }
+  .legend .key {
+    font-family: 'DejaVu Sans Mono', monospace;
+    font-size: 15px;
+    text-align: right;
+    padding-right: 8px;
+    border-right: 2px solid #333;
+  }
+  .legend .desc {
+    line-height: 1.45;
+    color: #bbb;
+  }
+  .legend .desc .when {
+    color: #888;
+    font-style: italic;
+    display: block;
+    margin-top: 2px;
+    font-size: 13px;
+  }
+  .footnote {
+    color: #666;
+    font-size: 12px;
+    margin-top: 28px;
+    font-family: 'DejaVu Sans', sans-serif;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <h1>claude-code-extras &mdash; statusline reference</h1>
+
+  <div class="terminal">
+    <span class="statusline"><span class="green-b">user@host</span><span class="dim">:</span><span class="blue">/Users/vm/projects/intendant/.claude/worktrees/feat</span> <span class="yellow">●3</span> <span class="magenta">[Opus 4.7 (1M context)]</span> <span class="cyan">██████░░░░</span> <span class="yellow">63%</span> <span class="green">+3</span><span class="dim">/</span><span class="red">-22</span> <span class="red-b">⚠</span> <span class="cyan">⇡2</span> <span class="cyan">main⇡4</span> <span class="dim">2026-04-20 09:48:26</span> <span class="dim">bea2936c</span></span>
+  </div>
+
+  <div class="legend">
+    <div class="row">
+      <div class="key"><span class="green-b">user@host</span></div>
+      <div class="desc">User + short hostname.<span class="when">Helpful when SSHing between machines or running multiple sandboxes — at-a-glance "which box am I on".</span></div>
+    </div>
+    <div class="row">
+      <div class="key"><span class="blue">/path/to/cwd</span></div>
+      <div class="desc">Current working directory.<span class="when">For worktrees, the path itself is the cleanest "which worktree" identifier.</span></div>
+    </div>
+
+    <div class="row">
+      <div class="key"><span class="yellow">●N</span></div>
+      <div class="desc">N modified, staged, or untracked files.<span class="when">Hidden when the worktree is clean. Reminds you that there's uncommitted work before you switch tasks or close a session.</span></div>
+    </div>
+    <div class="row">
+      <div class="key"><span class="magenta">[Model]</span></div>
+      <div class="desc">Active Claude model.<span class="when">Distinguishes Opus / Sonnet / Haiku at a glance — useful when juggling sessions on different models.</span></div>
+    </div>
+
+    <div class="row">
+      <div class="key"><span class="cyan">██████░░░░</span> <span class="yellow">63%</span></div>
+      <div class="desc">Context-window usage as a 10-cell bar + percentage.<span class="when">Tells you when to wind down a session before the context fills (compaction kicks in around the high end).</span></div>
+    </div>
+    <div class="row">
+      <div class="key"><span class="green">+N</span><span class="dim">/</span><span class="red">-M</span></div>
+      <div class="desc">Commits ahead / behind <code>origin/&lt;primary&gt;</code> (falls back to local if no origin).<span class="when">Compares against the remote tip rather than your possibly-stale local main, so a fresh worktree off origin/main reads <code>+0/-0</code> correctly.</span></div>
+    </div>
+
+    <div class="row">
+      <div class="key"><span class="green">✓</span> <span class="dim">/</span> <span class="red-b">⚠</span></div>
+      <div class="desc">Merge-parity preview vs the primary branch.<span class="when">✓ = merging would be clean (fast-forward in either direction OR a 3-way merge that <code>git merge-tree</code> says succeeds). ⚠ = it would conflict. Cached by HEAD-sha + main-sha.</span></div>
+    </div>
+    <div class="row">
+      <div class="key"><span class="cyan">⇡N</span></div>
+      <div class="desc">Current branch has N commits past its upstream (what <code>git push</code> would send). Hidden if no upstream is set.<span class="when">Reminds you to push before quitting. Visible <code>⇡0</code> means "I checked, you're synced."</span></div>
+    </div>
+
+    <div class="row">
+      <div class="key"><span class="cyan">main⇡M</span></div>
+      <div class="desc">Primary branch has M unpushed commits, shown only when current ≠ primary.<span class="when">For solo-dev workflows that merge into main and push from there: tells you "you have local-only merges on main from elsewhere".</span></div>
+    </div>
+    <div class="row">
+      <div class="key"><span class="dim">YYYY-MM-DD HH:MM:SS</span></div>
+      <div class="desc">Local time.<span class="when">Quick reference inside the TUI without leaving for a clock.</span></div>
+    </div>
+
+    <div class="row">
+      <div class="key"><span class="dim">abcd1234</span></div>
+      <div class="desc">First 8 chars of this session's UUID.<span class="when">Distinguishes tabs visually; also useful as a copy-paste ID for <code>claudet -s &lt;prefix&gt;</code> if auto-detection ever needs an override.</span></div>
+    </div>
+    <div class="row">
+      <div class="key"></div>
+      <div class="desc"></div>
+    </div>
+  </div>
+
+  <div class="footnote">
+    All git probes are fetch-free; merge-tree is gated on git&nbsp;≥&nbsp;2.38 and skipped silently otherwise. <code>●N</code> uses <code>--no-optional-locks</code> to avoid index-lock contention with concurrent agent activity.
+  </div>
+</body>
+</html>

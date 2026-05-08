@@ -4,6 +4,8 @@ Small tools that patch over a regression in [Claude Code](https://claude.com/cla
 thinking summaries were silently disabled by default, and the `showThinkingSummaries`
 setting in `~/.claude/settings.json` is currently ignored.
 
+![statusline reference](docs/statusline-features.png)
+
 This repo bundles:
 
 - a **wrapper** that re-enables thinking summaries by passing the (undocumented)
