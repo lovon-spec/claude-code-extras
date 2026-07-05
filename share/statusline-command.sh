@@ -22,16 +22,20 @@ session_id=$(echo "$input" | jq -r '.session_id // empty')
 transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
 
 # Cache + rate-limit numbers in one jq pass; -1 marks "not provided" (older
-# Claude Code versions, or no API request yet this session). All values are
-# integers, so unquoted set-splitting of the @tsv output is safe.
-set -- $(echo "$input" | jq -r '[
-    (.context_window.current_usage.cache_read_input_tokens // -1),
-    (.context_window.current_usage.cache_creation_input_tokens // -1),
-    (.context_window.current_usage.input_tokens // -1),
-    (.rate_limits.five_hour.used_percentage // -1),
-    (.rate_limits.five_hour.resets_at // -1),
-    (.rate_limits.seven_day.used_percentage // -1),
-    (.rate_limits.seven_day.resets_at // -1)
+# Claude Code versions, or no API request yet this session). Every value is
+# rounded to an integer — used_percentage arrives as a float at times
+# (56.00000000000001), which would trip the shell's integer tests and
+# silently hide the segment. Integer output also makes the unquoted
+# set-splitting of the @tsv safe.
+set -- $(echo "$input" | jq -r 'def r: (. // -1) + 0.5 | floor;
+  [
+    (.context_window.current_usage.cache_read_input_tokens | r),
+    (.context_window.current_usage.cache_creation_input_tokens | r),
+    (.context_window.current_usage.input_tokens | r),
+    (.rate_limits.five_hour.used_percentage | r),
+    (.rate_limits.five_hour.resets_at | r),
+    (.rate_limits.seven_day.used_percentage | r),
+    (.rate_limits.seven_day.resets_at | r)
   ] | @tsv' 2>/dev/null)
 cu_read=${1:--1} cu_create=${2:--1} cu_input=${3:--1}
 rl5_pct=${4:--1} rl5_reset=${5:--1} rl7_pct=${6:--1} rl7_reset=${7:--1}
