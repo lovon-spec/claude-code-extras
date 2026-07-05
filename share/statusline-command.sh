@@ -15,30 +15,40 @@
 # =============================================================================
 
 input=$(cat)
-cwd=$(echo "$input" | jq -r '.cwd')
-model=$(echo "$input" | jq -r '.model.display_name // .model.id // "unknown"')
-used_pct=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
-session_id=$(echo "$input" | jq -r '.session_id // empty')
-transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
 
-# Cache + rate-limit numbers in one jq pass; -1 marks "not provided" (older
-# Claude Code versions, or no API request yet this session). Every value is
-# rounded to an integer — used_percentage arrives as a float at times
-# (56.00000000000001), which would trip the shell's integer tests and
-# silently hide the segment. Integer output also makes the unquoted
-# set-splitting of the @tsv safe.
-set -- $(echo "$input" | jq -r 'def r: (. // -1) + 0.5 | floor;
-  [
-    (.context_window.current_usage.cache_read_input_tokens | r),
-    (.context_window.current_usage.cache_creation_input_tokens | r),
-    (.context_window.current_usage.input_tokens | r),
-    (.rate_limits.five_hour.used_percentage | r),
-    (.rate_limits.five_hour.resets_at | r),
-    (.rate_limits.seven_day.used_percentage | r),
-    (.rate_limits.seven_day.resets_at | r)
-  ] | @tsv' 2>/dev/null)
-cu_read=${1:--1} cu_create=${2:--1} cu_input=${3:--1}
-rl5_pct=${4:--1} rl5_reset=${5:--1} rl7_pct=${6:--1} rl7_reset=${7:--1}
+# Everything the script needs from the JSON in ONE jq pass (the previous
+# shape — one jq fork per field — was ~6 forks on every 2s tick, times one
+# statusline per live session). @sh shell-quotes each interpolated value,
+# which is what makes the eval safe even for paths containing spaces or
+# quotes. Numbers go through `n`: rounded to integers (used_percentage
+# arrives as a float at times — 56.00000000000001 — which would trip the
+# shell's integer tests), with -1 marking "not provided" (older Claude
+# Code versions, or no API request yet this session).
+eval "$(echo "$input" | jq -r '
+  def n: (. // -1) + 0.5 | floor;
+  @sh "cwd=\(.cwd // "")
+model=\(.model.display_name // .model.id // "unknown")
+used_pct=\(.context_window.used_percentage // "")
+session_id=\(.session_id // "")
+transcript_path=\(.transcript_path // "")
+cu_read=\(.context_window.current_usage.cache_read_input_tokens | n)
+cu_create=\(.context_window.current_usage.cache_creation_input_tokens | n)
+cu_input=\(.context_window.current_usage.input_tokens | n)
+rl5_pct=\(.rate_limits.five_hour.used_percentage | n)
+rl5_reset=\(.rate_limits.five_hour.resets_at | n)
+rl7_pct=\(.rate_limits.seven_day.used_percentage | n)
+rl7_reset=\(.rate_limits.seven_day.resets_at | n)"' 2>/dev/null)"
+# Defaults for the malformed-input case (jq failed, eval was a no-op):
+# render what we can, hide the data-driven segments.
+cwd=${cwd:-} model=${model:-unknown} used_pct=${used_pct:-}
+session_id=${session_id:-} transcript_path=${transcript_path:-}
+cu_read=${cu_read:--1} cu_create=${cu_create:--1} cu_input=${cu_input:--1}
+rl5_pct=${rl5_pct:--1} rl5_reset=${rl5_reset:--1}
+rl7_pct=${rl7_pct:--1} rl7_reset=${rl7_reset:--1}
+
+# Single time read, reused by the TTL countdown, the rate-limit reset
+# countdown and the periodic-cleanup gate below.
+now_epoch=$(date +%s)
 
 # --- Record current session for claudet auto-detection ----------------------
 # Claude Code spawns the statusline as: claude -> sh -c -> bash -> script,
@@ -63,12 +73,35 @@ find_claude_ancestor() {
 }
 
 if [ -n "$transcript_path" ]; then
-  claude_pid=$(find_claude_ancestor) || claude_pid=""
-  if [ -n "$claude_pid" ]; then
-    cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-sessions"
-    mkdir -p "$cache_dir"
-    printf '%s\n' "$transcript_path" > "$cache_dir/$claude_pid"
-    # Clean entries whose pid is no longer a running claude process.
+  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-sessions"
+  mkdir -p "$cache_dir"
+  # Fast path: a cache entry from a previous tick already maps this
+  # transcript to a pid that is still a live claude process — one ps fork
+  # to validate instead of the ~10-fork parent walk. Falls back to the
+  # walk on a session's first tick or after pid churn. `read` is a
+  # builtin, so scanning the handful of entries costs no forks.
+  claude_pid=""
+  for f in "$cache_dir"/*; do
+    [ -f "$f" ] || continue
+    IFS= read -r _cached_tp < "$f" || continue
+    [ "$_cached_tp" = "$transcript_path" ] || continue
+    _pid=$(basename "$f")
+    case "$_pid" in *[!0-9]*) continue ;; esac
+    case "$(ps -o comm= -p "$_pid" 2>/dev/null | awk '{print $1}')" in
+      claude|*/claude) claude_pid=$_pid; break ;;
+    esac
+  done
+  if [ -z "$claude_pid" ]; then
+    claude_pid=$(find_claude_ancestor) || claude_pid=""
+    if [ -n "$claude_pid" ]; then
+      printf '%s\n' "$transcript_path" > "$cache_dir/$claude_pid"
+    fi
+  fi
+  # Stale-entry cleanup costs a ps fork per cache file, so it runs on
+  # roughly one tick in fifteen (a ~30s cadence at the 2s refresh) —
+  # plenty for pid-reuse hygiene. The merge-preview cache is pruned on
+  # the same cadence.
+  if [ -n "$claude_pid" ] && [ $((now_epoch % 30)) -lt 2 ]; then
     for f in "$cache_dir"/*; do
       [ -f "$f" ] || continue
       pid=$(basename "$f")
@@ -78,6 +111,8 @@ if [ -n "$transcript_path" ]; then
       comm=$(ps -o comm= -p "$pid" 2>/dev/null | awk '{print $1}')
       case "$comm" in claude|*/claude) : ;; *) rm -f "$f" ;; esac
     done
+    find "${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline-merge" \
+      -type f -mtime +7 -delete 2>/dev/null
   fi
 fi
 
@@ -111,7 +146,7 @@ fi
 
 # --- Render ----------------------------------------------------------------
 printf '\033[01;32m%s@%s\033[00m:\033[01;34m%s\033[00m' \
-  "$(whoami)" "$(hostname -s)" "$cwd"
+  "${USER:-$(whoami)}" "$(hostname -s)" "$cwd"
 
 if [ -n "$dirty" ]; then
   printf ' \033[00;33m●%s\033[00m' "$dirty_count"
@@ -348,7 +383,7 @@ if [ "$cache_ttl" != "0" ] && [ -n "$transcript_path" ] && [ -f "$transcript_pat
     case "$t_api" in ''|*[!0-9]*) t_api="" ;; esac
   fi
   if [ -n "$t_api" ]; then
-    ttl_remaining=$((cache_ttl - ($(date +%s) - t_api)))
+    ttl_remaining=$((cache_ttl - (now_epoch - t_api)))
     [ "$ttl_remaining" -lt 0 ] && ttl_remaining=0
   fi
 
@@ -430,7 +465,7 @@ if [ "${CLAUDE_STATUSLINE_RATE_LIMITS:-1}" != "0" ]; then
     fi
     printf ' \033[%sm%s%s%%' "$_rlc" "$1" "$2"
     if [ "$2" -ge 90 ] && [ "$3" -gt 0 ] 2>/dev/null; then
-      _rll=$(( $3 - $(date +%s) ))
+      _rll=$(( $3 - now_epoch ))
       if [ "$_rll" -gt 0 ]; then
         printf '(%dh%02d)' $((_rll / 3600)) $((_rll % 3600 / 60))
       fi
@@ -445,7 +480,7 @@ printf ' \033[00;90m%s\033[00m' "$(date '+%Y-%m-%d %H:%M:%S')"
 
 # Short session id (first 8 chars) — dim, so it's identifying but not loud.
 if [ -n "$session_id" ]; then
-  sid_short=$(printf '%s' "$session_id" | cut -c1-8)
+  sid_short=$(printf '%.8s' "$session_id")
   printf ' \033[00;90m%s\033[00m' "$sid_short"
 fi
 
