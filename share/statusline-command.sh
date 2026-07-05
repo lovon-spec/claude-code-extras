@@ -336,9 +336,14 @@ fi
 #                dialects may show the notification twice — pin osc777 or
 #                osc9 to taste.
 #   osc777|osc9  just that one escape dialect
+#   bell         a plain terminal bell (BEL) — the one signal Apple
+#                Terminal honors (beep + Dock badge), locally or over ssh
 #   off          disable (same as CLAUDE_STATUSLINE_CACHE_WARN=0)
-#   auto         osc when the session is remote (SSH_TTY/SSH_CONNECTION
-#                set), else osascript → notify-send → osc by availability
+#   auto         "osc bell" when the session is remote (SSH_TTY /
+#                SSH_CONNECTION set, or an sshd ancestor — sudo chains
+#                commonly scrub the env), else osascript → notify-send →
+#                "osc bell" by availability
+# Values combine space-separated, e.g. CLAUDE_STATUSLINE_NOTIFY="osc9 bell".
 if [ -n "$ttl_remaining" ] && [ "$ttl_remaining" -gt 0 ] \
    && [ "$cache_warn" -gt 0 ] && [ "$ttl_remaining" -le "$cache_warn" ] \
    && [ -n "$session_id" ]; then
@@ -370,44 +375,67 @@ if [ -n "$ttl_remaining" ] && [ "$ttl_remaining" -gt 0 ] \
       # '??' (macOS) / '?' (Linux) / '-' mean "no terminal at all".
       case "$osc_dev" in ''|\?*|-) osc_dev="" ;; *) osc_dev="/dev/$osc_dev" ;; esac
     fi
-    osc_notify() {
+    tty_write() {  # write $1 verbatim to the claude terminal, best-effort
       [ -n "$osc_dev" ] && [ -w "$osc_dev" ] || return 0
+      { printf '%s' "$1" > "$osc_dev"; } 2>/dev/null || :
+    }
+    osc_notify() {
       case "$1" in
         osc777) _osc=$(printf ']777;notify;%s;%s\a' "$ttl_title" "$ttl_msg") ;;
         osc9)   _osc=$(printf ']9;%s — %s\a' "$ttl_title" "$ttl_msg") ;;
         *) return 0 ;;
       esac
       if [ -n "${TMUX:-}" ]; then
-        { printf '\033Ptmux;\033\033%s\033\\' "$_osc" > "$osc_dev"; } 2>/dev/null || :
+        tty_write "$(printf '\033Ptmux;\033\033%s\033\\' "$_osc")"
       else
-        { printf '\033%s' "$_osc" > "$osc_dev"; } 2>/dev/null || :
+        tty_write "$(printf '\033%s' "$_osc")"
       fi
+    }
+    # sudo/login chains commonly scrub SSH_* from the environment, so as a
+    # fallback ask the process tree whether claude hangs off an sshd.
+    ssh_ancestor() {
+      _ap=${claude_pid:-$$}
+      _ai=0
+      while [ "$_ai" -lt 15 ]; do
+        _ap=$(ps -o ppid= -p "$_ap" 2>/dev/null | tr -d ' ')
+        [ -z "$_ap" ] && return 1
+        [ "$_ap" -le 1 ] && return 1
+        case "$(ps -o comm= -p "$_ap" 2>/dev/null)" in
+          sshd*|*/sshd*) return 0 ;;
+        esac
+        _ai=$((_ai + 1))
+      done
+      return 1
     }
 
     ttl_notify=${CLAUDE_STATUSLINE_NOTIFY:-auto}
     if [ "$ttl_notify" = "auto" ]; then
-      if [ -n "${SSH_TTY:-}${SSH_CONNECTION:-}" ]; then
-        ttl_notify=osc
+      if [ -n "${SSH_TTY:-}${SSH_CONNECTION:-}" ] || ssh_ancestor; then
+        ttl_notify="osc bell"
       elif command -v osascript >/dev/null 2>&1; then
         ttl_notify=osascript
       elif command -v notify-send >/dev/null 2>&1; then
         ttl_notify=notify-send
       else
-        ttl_notify=osc
+        ttl_notify="osc bell"
       fi
     fi
     # stdout/stderr of backgrounded children must go to /dev/null: a child
     # inheriting the statusline's stdout pipe would keep it open and stall
-    # the redraw.
-    case "$ttl_notify" in
-      osascript)
-        osascript -e "display notification \"$ttl_msg\" with title \"Claude Code\" subtitle \"$ttl_where · $sid_short\" sound name \"Ping\"" >/dev/null 2>&1 &
-        ;;
-      notify-send)
-        notify-send -a 'Claude Code' "$ttl_title" "$ttl_msg" >/dev/null 2>&1 &
-        ;;
-      osc)    osc_notify osc777; osc_notify osc9 ;;
-      osc777|osc9) osc_notify "$ttl_notify" ;;
-    esac
+    # the redraw. $ttl_notify is deliberately unquoted: space-separated
+    # methods dispatch in order.
+    for ttl_method in $ttl_notify; do
+      case "$ttl_method" in
+        osascript)
+          osascript -e "display notification \"$ttl_msg\" with title \"Claude Code\" subtitle \"$ttl_where · $sid_short\" sound name \"Ping\"" >/dev/null 2>&1 &
+          ;;
+        notify-send)
+          notify-send -a 'Claude Code' "$ttl_title" "$ttl_msg" >/dev/null 2>&1 &
+          ;;
+        osc)    osc_notify osc777; osc_notify osc9 ;;
+        osc777|osc9) osc_notify "$ttl_method" ;;
+        bell)   tty_write "$(printf '\a')" ;;
+      esac
+    done
   fi
 fi

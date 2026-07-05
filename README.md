@@ -110,16 +110,18 @@ Claude Code doesn't expose cache state, so the script infers it:
   while there's still time to act — never after the fact. macOS uses
   `osascript` (the notification is attributed to Script Editor; allow it
   if macOS asks on first use), Linux uses `notify-send` if installed.
-- **Over ssh** it works with zero extra setup: when `SSH_TTY` /
-  `SSH_CONNECTION` are set, the script instead writes OSC 777 + OSC 9
-  escape sequences to the claude process's terminal device (found by
-  walking the process tree — the statusline itself is spawned without a
-  controlling tty). The escape rides the pty byte stream back to your
-  **local** terminal emulator, and *it* raises the desktop
-  notification. kitty, WezTerm, Ghostty, foot and urxvt speak OSC 777;
-  iTerm2 speaks OSC 9; Apple Terminal speaks neither. Terminals that
-  speak both dialects may notify twice on `osc` — pin `osc777` or `osc9`
-  via `CLAUDE_STATUSLINE_NOTIFY`. Inside tmux the escape is
+- **Over ssh** it works with zero extra setup: for remote sessions
+  (`SSH_TTY`/`SSH_CONNECTION` set, or an `sshd` ancestor in the process
+  tree — sudo chains commonly scrub the env) the script instead writes
+  OSC 777 + OSC 9 escape sequences plus a terminal bell to the claude
+  process's terminal device (found by walking the process tree — the
+  statusline itself is spawned without a controlling tty). Those bytes
+  ride the pty stream back to your **local** terminal emulator, and *it*
+  raises the notification. kitty, WezTerm, Ghostty, foot and urxvt speak
+  OSC 777; iTerm2 speaks OSC 9; Apple Terminal speaks neither but honors
+  the **bell** — an audible beep plus a Dock badge. Terminals that speak
+  both OSC dialects may notify twice — pin `osc777` or `osc9` via
+  `CLAUDE_STATUSLINE_NOTIFY`. Inside tmux the escapes are
   passthrough-wrapped, which needs `set -g allow-passthrough on`
   (tmux ≥ 3.3).
 - Ticking while idle relies on the `statusLine.refreshInterval` the
@@ -130,7 +132,7 @@ Claude Code doesn't expose cache state, so the script infers it:
 |---|---|
 | `CLAUDE_STATUSLINE_CACHE_TTL` | Cache TTL in seconds, overriding auto-detection; `0` hides the segment. |
 | `CLAUDE_STATUSLINE_CACHE_WARN` | Warn threshold in seconds — at or below it the countdown turns yellow (red under half of it) and the notification fires; `0` disables the notification. Default 60, or 300 when the detected TTL is 1 h. |
-| `CLAUDE_STATUSLINE_NOTIFY` | Delivery method: `auto` (default), `osascript`, `notify-send`, `osc` (both escape dialects), `osc777`, `osc9`, or `off`. `auto` picks `osc` when the session is remote (ssh), otherwise the first available local mechanism. |
+| `CLAUDE_STATUSLINE_NOTIFY` | Delivery method(s), space-separable: `auto` (default), `osascript`, `notify-send`, `osc` (both escape dialects), `osc777`, `osc9`, `bell`, `off`. `auto` picks `osc bell` for remote sessions, otherwise the first available local mechanism. |
 
 ## Installer behavior
 
@@ -162,10 +164,11 @@ is removed. `~/.local/bin-wrap/` is removed only if it's empty.
 - jq (used by the statusline; pre-installed on macOS, `apt install jq` on Debian/Ubuntu)
 - desktop notifications for the cache-TTL warning use `osascript` (built
   into macOS) or `notify-send` (Linux; `apt install libnotify-bin`); over
-  ssh they use OSC escape sequences instead, which need a supporting
-  *local* terminal (kitty / WezTerm / Ghostty / foot / urxvt / iTerm2 —
-  not Apple Terminal). If nothing suitable is present, the countdown
-  still renders and only the notification is skipped.
+  ssh they use OSC escape sequences plus the terminal bell instead.
+  Banners need a supporting *local* terminal (kitty / WezTerm / Ghostty /
+  foot / urxvt / iTerm2); Apple Terminal only beeps and badges the Dock.
+  If nothing suitable is present, the countdown still renders and only
+  the notification is skipped.
 - **git ≥ 2.38** for the statusline's merge-preview indicator (`⚠` / `✓`).
   Older git silently skips the feature and shows just `+N/-M`. Debian 12
   and macOS Ventura (13) and later ship a new-enough git; Debian 11 does
