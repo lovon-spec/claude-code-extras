@@ -3,7 +3,8 @@
 #  statusline-command.sh — Claude Code statusLine renderer
 # =============================================================================
 #
-#  Renders: user@host : cwd [model] █░░ 30%  +N/-M  YYYY-mm-dd HH:MM:SS ABCD1234
+#  Renders: user@host : cwd ●N [model] █░░ 30% +N/-M ✓ ⇡n main⇡m ⏳4:32
+#           YYYY-mm-dd HH:MM:SS ABCD1234
 #
 #  Also writes the current session's transcript_path to
 #      $XDG_CACHE_HOME/claude-sessions/<claude-pid>
@@ -223,10 +224,190 @@ if [ -n "$git_info" ]; then
 
 fi
 
+# --- Prompt-cache TTL countdown ---------------------------------------------
+# Claude Code's API requests keep a prompt cache alive; every request
+# refreshes its TTL (5 minutes on API billing, 1 hour on subscription
+# plans). While it's warm, the next message reuses the cached prefix —
+# cheaper and faster; once it lapses the full context is re-written.
+# The statusline JSON exposes no cache state, so two proxies are used:
+#   freshness = transcript mtime ("last API activity": the JSONL is appended
+#               on every turn and goes quiet exactly when the session idles —
+#               including during long tool runs, when the cache genuinely
+#               does decay);
+#   TTL       = the most recent nonzero ephemeral_{5m,1h} cache-creation
+#               entry in the transcript tail (1h → 3600s, else 300s).
+# Rendered as:
+#   ⏳54:07  time left — green, yellow under WARN, red under WARN/2
+#   ⏳✗      dim: cache has gone cold; the next message pays full price
+# Knobs (environment):
+#   CLAUDE_STATUSLINE_CACHE_TTL   seconds; 0 hides the segment entirely
+#                                 (default: auto-detect as above)
+#   CLAUDE_STATUSLINE_CACHE_WARN  warn threshold in seconds; 0 disables the
+#                                 desktop notification (default: 60, or 300
+#                                 when the detected TTL is one hour)
+cache_ttl=${CLAUDE_STATUSLINE_CACHE_TTL:-}
+case "$cache_ttl" in *[!0-9]*) cache_ttl="" ;; esac
+ttl_remaining=""
+if [ "$cache_ttl" != "0" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+  if [ -z "$cache_ttl" ]; then
+    ttl_dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline-ttl"
+    ttl_cache_file=""
+    [ -n "$session_id" ] && ttl_cache_file="$ttl_dir/$session_id.ttl"
+    ttl_seen=$(tail -c 262144 "$transcript_path" 2>/dev/null \
+      | grep -o '"ephemeral_[15][mh]_input_tokens":[1-9][0-9]*' | tail -1)
+    case "$ttl_seen" in
+      *ephemeral_1h*) cache_ttl=3600 ;;
+      *ephemeral_5m*) cache_ttl=300  ;;
+      *)
+        # No usage entry in the tail window — happens when one huge tool
+        # result (an image read, a giant diff) fills the last 256K by
+        # itself. Fall back to this session's last confident verdict
+        # rather than mis-defaulting mid-session.
+        [ -n "$ttl_cache_file" ] && cache_ttl=$(cat "$ttl_cache_file" 2>/dev/null)
+        case "$cache_ttl" in ''|*[!0-9]*) cache_ttl=300 ;; esac
+        ;;
+    esac
+    if [ -n "$ttl_cache_file" ] && [ -n "$ttl_seen" ] \
+       && [ "$(cat "$ttl_cache_file" 2>/dev/null)" != "$cache_ttl" ]; then
+      mkdir -p "$ttl_dir"
+      printf '%s' "$cache_ttl" > "$ttl_cache_file"
+    fi
+  fi
+  cache_warn=${CLAUDE_STATUSLINE_CACHE_WARN:-}
+  case "$cache_warn" in *[!0-9]*) cache_warn="" ;; esac
+  if [ -z "$cache_warn" ]; then
+    if [ "$cache_ttl" -gt 300 ]; then cache_warn=300; else cache_warn=60; fi
+  fi
+  # GNU stat (-c) first, BSD/macOS stat (-f) second. The order matters: GNU
+  # stat also accepts -f, but as *filesystem* status — it would succeed and
+  # return garbage, poisoning the fallback chain if tried first.
+  t_mtime=$(stat -c %Y "$transcript_path" 2>/dev/null \
+    || stat -f %m "$transcript_path" 2>/dev/null)
+  case "$t_mtime" in ''|*[!0-9]*) t_mtime="" ;; esac
+  if [ -n "$t_mtime" ]; then
+    ttl_remaining=$((cache_ttl - ($(date +%s) - t_mtime)))
+    [ "$ttl_remaining" -lt 0 ] && ttl_remaining=0
+  fi
+fi
+
+if [ -n "$ttl_remaining" ]; then
+  if [ "$ttl_remaining" -gt 0 ]; then
+    if [ "$ttl_remaining" -gt "$cache_warn" ]; then
+      ttl_color='00;32'
+    elif [ "$ttl_remaining" -gt $((cache_warn / 2)) ]; then
+      ttl_color='00;33'
+    else
+      ttl_color='01;31'
+    fi
+    printf ' \033[%sm⏳%d:%02d\033[00m' \
+      "$ttl_color" $((ttl_remaining / 60)) $((ttl_remaining % 60))
+  else
+    printf ' \033[00;90m⏳✗\033[00m'
+  fi
+fi
+
 printf ' \033[00;90m%s\033[00m' "$(date '+%Y-%m-%d %H:%M:%S')"
 
 # Short session id (first 8 chars) — dim, so it's identifying but not loud.
 if [ -n "$session_id" ]; then
   sid_short=$(printf '%s' "$session_id" | cut -c1-8)
   printf ' \033[00;90m%s\033[00m' "$sid_short"
+fi
+
+# --- Cache-expiry desktop notification --------------------------------------
+# Fires once per idle period (keyed by session id + transcript mtime) when
+# the countdown first drops under the warn threshold, so a message can still
+# land before the cache goes cold. Never fired once already expired — a "too
+# late" ping is just noise. Relies on statusLine.refreshInterval to keep
+# ticking while idle — without it this only runs on message events.
+#
+# Delivery (CLAUDE_STATUSLINE_NOTIFY, default `auto`):
+#   osascript    macOS Notification Center (attributed to Script Editor;
+#                macOS may ask for permission on first use)
+#   notify-send  Linux desktop notification (libnotify)
+#   osc          both OSC 777 and OSC 9 terminal escapes, written to the
+#                claude process's terminal device: the local terminal
+#                emulator itself raises the notification, so this works
+#                UNCHANGED over ssh — the sequence rides the pty byte
+#                stream home. Supported by
+#                kitty / WezTerm / Ghostty / foot / urxvt (OSC 777) and
+#                iTerm2 (OSC 9); ignored silently elsewhere (Apple
+#                Terminal supports neither). Terminals speaking both
+#                dialects may show the notification twice — pin osc777 or
+#                osc9 to taste.
+#   osc777|osc9  just that one escape dialect
+#   off          disable (same as CLAUDE_STATUSLINE_CACHE_WARN=0)
+#   auto         osc when the session is remote (SSH_TTY/SSH_CONNECTION
+#                set), else osascript → notify-send → osc by availability
+if [ -n "$ttl_remaining" ] && [ "$ttl_remaining" -gt 0 ] \
+   && [ "$cache_warn" -gt 0 ] && [ "$ttl_remaining" -le "$cache_warn" ] \
+   && [ -n "$session_id" ]; then
+  ttl_mark_dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline-ttl"
+  mkdir -p "$ttl_mark_dir"
+  ttl_mark_file="$ttl_mark_dir/$session_id"
+  if [ "$(cat "$ttl_mark_file" 2>/dev/null)" != "$t_mtime" ]; then
+    printf '%s' "$t_mtime" > "$ttl_mark_file"
+    # Markers are ~10 bytes each; prune ones from long-dead sessions. (A
+    # live session idle >1 day has an expired cache, which the -gt 0 guard
+    # above already silences — losing its marker re-notifies nobody.)
+    find "$ttl_mark_dir" -type f -mtime +1 -delete 2>/dev/null
+    ttl_where=$(basename "$cwd" | tr -cd 'A-Za-z0-9 ._-')
+    ttl_title="Claude Code · $ttl_where · $sid_short"
+    ttl_msg=$(printf 'Prompt cache expires in %d:%02d — send a message to keep it warm' \
+      $((ttl_remaining / 60)) $((ttl_remaining % 60)))
+
+    # Emit one OSC notification escape to the terminal. Claude Code spawns
+    # the statusline with no controlling tty (/dev/tty won't open), so the
+    # escape is written to the terminal device of the claude ancestor — the
+    # process the session-cache block above already locates. Our sequences
+    # contain exactly one ESC (the leader) and end in BEL, so the tmux
+    # passthrough wrapper (which requires inner ESCs doubled; needs
+    # `set -g allow-passthrough on` in tmux ≥ 3.3) can be built literally.
+    [ -n "${claude_pid:-}" ] || claude_pid=$(find_claude_ancestor) || claude_pid=""
+    osc_dev=""
+    if [ -n "$claude_pid" ]; then
+      osc_dev=$(ps -o tty= -p "$claude_pid" 2>/dev/null | tr -d ' ')
+      # '??' (macOS) / '?' (Linux) / '-' mean "no terminal at all".
+      case "$osc_dev" in ''|\?*|-) osc_dev="" ;; *) osc_dev="/dev/$osc_dev" ;; esac
+    fi
+    osc_notify() {
+      [ -n "$osc_dev" ] && [ -w "$osc_dev" ] || return 0
+      case "$1" in
+        osc777) _osc=$(printf ']777;notify;%s;%s\a' "$ttl_title" "$ttl_msg") ;;
+        osc9)   _osc=$(printf ']9;%s — %s\a' "$ttl_title" "$ttl_msg") ;;
+        *) return 0 ;;
+      esac
+      if [ -n "${TMUX:-}" ]; then
+        { printf '\033Ptmux;\033\033%s\033\\' "$_osc" > "$osc_dev"; } 2>/dev/null || :
+      else
+        { printf '\033%s' "$_osc" > "$osc_dev"; } 2>/dev/null || :
+      fi
+    }
+
+    ttl_notify=${CLAUDE_STATUSLINE_NOTIFY:-auto}
+    if [ "$ttl_notify" = "auto" ]; then
+      if [ -n "${SSH_TTY:-}${SSH_CONNECTION:-}" ]; then
+        ttl_notify=osc
+      elif command -v osascript >/dev/null 2>&1; then
+        ttl_notify=osascript
+      elif command -v notify-send >/dev/null 2>&1; then
+        ttl_notify=notify-send
+      else
+        ttl_notify=osc
+      fi
+    fi
+    # stdout/stderr of backgrounded children must go to /dev/null: a child
+    # inheriting the statusline's stdout pipe would keep it open and stall
+    # the redraw.
+    case "$ttl_notify" in
+      osascript)
+        osascript -e "display notification \"$ttl_msg\" with title \"Claude Code\" subtitle \"$ttl_where · $sid_short\" sound name \"Ping\"" >/dev/null 2>&1 &
+        ;;
+      notify-send)
+        notify-send -a 'Claude Code' "$ttl_title" "$ttl_msg" >/dev/null 2>&1 &
+        ;;
+      osc)    osc_notify osc777; osc_notify osc9 ;;
+      osc777|osc9) osc_notify "$ttl_notify" ;;
+    esac
+  fi
 fi

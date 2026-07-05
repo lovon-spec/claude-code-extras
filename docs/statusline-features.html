@@ -1,4 +1,9 @@
 <!DOCTYPE html>
+<!-- Source for docs/statusline-features.png. Re-render with:
+       firefox --headless --window-size=1450,900 \
+         --screenshot=docs/statusline-features.png \
+         file://$(pwd)/docs/statusline-features.html
+-->
 <html>
 <head>
 <meta charset="utf-8">
@@ -85,7 +90,7 @@
   <h1>claude-code-extras &mdash; statusline reference</h1>
 
   <div class="terminal">
-    <span class="statusline"><span class="green-b">user@host</span><span class="dim">:</span><span class="blue">~/projects/intendant/feat</span> <span class="yellow">●3</span> <span class="magenta">[Opus 4.7]</span> <span class="cyan">██████░░░░</span> <span class="yellow">63%</span> <span class="green">+3</span><span class="dim">/</span><span class="red">-22</span> <span class="red-b">⚠</span> <span class="cyan">⇡2</span> <span class="cyan">main⇡4</span> <span class="dim">2026-04-20 09:48:26</span> <span class="dim">bea2936c</span></span>
+    <span class="statusline"><span class="green-b">user@host</span><span class="dim">:</span><span class="blue">~/projects/intendant/feat</span> <span class="yellow">●3</span> <span class="magenta">[Opus 4.7]</span> <span class="cyan">██████░░░░</span> <span class="yellow">63%</span> <span class="green">+3</span><span class="dim">/</span><span class="red">-22</span> <span class="red-b">⚠</span> <span class="cyan">⇡2</span> <span class="cyan">main⇡4</span> <span class="green">⏳54:07</span> <span class="dim">2026-04-20 09:48:26</span> <span class="dim">bea2936c</span></span>
   </div>
 
   <div class="legend">
@@ -139,8 +144,8 @@
       <div class="desc">First 8 chars of this session's UUID.<span class="when">Distinguishes tabs visually; also useful as a copy-paste ID for <code>claudet -s &lt;prefix&gt;</code> if auto-detection ever needs an override.</span></div>
     </div>
     <div class="row">
-      <div class="key"></div>
-      <div class="desc"></div>
+      <div class="key"><span class="green">⏳54:07</span></div>
+      <div class="desc">Prompt-cache time-to-live; desktop notification before expiry (locally, or via OSC escapes over ssh).<span class="when">Auto-detects the 1&nbsp;h (subscription) vs 5&nbsp;min (API) cache from the transcript. Green → yellow → red as expiry nears; dim ⏳✗ once cold — the next message then re-writes the full context.</span></div>
     </div>
   </div>
 

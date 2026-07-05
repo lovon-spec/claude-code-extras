@@ -16,9 +16,10 @@ This repo bundles:
   one, and older summaries are overwritten as new ones stream in;
 - a **statusline** that renders cwd, model, context-window usage with a
   progress bar, git ahead/behind vs. the primary branch, a **merge
-  preview** (✓ clean / ⚠ would conflict) cached by commit SHA, a clock,
-  and the first 8 chars of the session id (install is opt-out via
-  `--no-statusline`);
+  preview** (✓ clean / ⚠ would conflict) cached by commit SHA, a
+  **prompt-cache TTL countdown** (⏳54:07) with a desktop notification
+  before the cache goes cold, a clock, and the first 8 chars of the
+  session id (install is opt-out via `--no-statusline`);
 - an idempotent **`install.sh`** / **`uninstall.sh`** pair that's safe to
   run on a machine with an existing Claude Code setup.
 
@@ -44,7 +45,7 @@ claudet 5             # last 5 thinking blocks from your most recent session
 | `~/.local/bin/claudet` | python3 script: extracts thinking blocks from the latest session JSONL | whenever the wrapper is removed |
 | PATH block in your shell rc | prepends `~/.local/bin-wrap` and `~/.local/bin` | framed by sentinel markers so `uninstall.sh` can remove it cleanly |
 | `~/.cache/claude-wrapper.flag` | per-version cache of the flag probe result | auto-regenerates; safe to delete anytime |
-| `~/.claude/statusline-command.sh` *(unless `--no-statusline`)* | renders cwd, model, context-window bar, git +/- vs main, clock | remove with `./uninstall.sh`, or pass `--no-statusline` to skip on install |
+| `~/.claude/statusline-command.sh` *(unless `--no-statusline`)* | renders cwd, model, context-window bar, git +/- vs main, cache-TTL countdown, clock | remove with `./uninstall.sh`, or pass `--no-statusline` to skip on install |
 | `statusLine` block in `~/.claude/settings.json` *(unless `--no-statusline`)* | points CC at the statusline script, 2-second refresh | `uninstall.sh` only removes it if the `command` value is the one we wrote — user-customized statusLines are left alone |
 
 Nothing else under `~/.claude/` is touched.
@@ -82,6 +83,55 @@ The statusline also shows the first 8 chars of the session id at the end
 of the line, so you can visually distinguish tabs and have a reference
 for `-s` on the rare cold-start race.
 
+## Cache-TTL countdown & expiry notification
+
+Every Claude Code request keeps the conversation prefix alive in the API's
+prompt cache — for 5 minutes on API-key billing, 1 hour on subscription
+plans, refreshed on each use. While it's warm, your next message is cheaper
+and starts faster; once it lapses, the next request re-writes the whole
+context at full input cost. The statusline counts down the time the cache
+has left (⏳54:07 — green, turning yellow and then red as expiry nears; a
+dim ⏳✗ once cold) and fires a desktop notification shortly before expiry,
+so a quick message can keep the cache warm.
+
+Claude Code doesn't expose cache state, so the script infers it:
+
+- **Freshness** comes from the transcript's mtime: the session JSONL is
+  appended on every turn and goes quiet exactly when the session idles.
+  (The countdown also runs during a single long tool call — correctly so:
+  no API request is in flight then, and the cache really is decaying.)
+- **TTL** is auto-detected from the most recent nonzero
+  `ephemeral_{5m,1h}_input_tokens` cache-creation entry in the transcript
+  tail, so it tracks whatever your plan / env vars actually negotiated
+  (subscription plans get 1 h; `FORCE_PROMPT_CACHING_5M` etc. are picked
+  up automatically because detection observes what really happened).
+- The **notification** fires once per idle period (keyed by session id +
+  transcript mtime under `~/.cache/claude-statusline-ttl/`), and only
+  while there's still time to act — never after the fact. macOS uses
+  `osascript` (the notification is attributed to Script Editor; allow it
+  if macOS asks on first use), Linux uses `notify-send` if installed.
+- **Over ssh** it works with zero extra setup: when `SSH_TTY` /
+  `SSH_CONNECTION` are set, the script instead writes OSC 777 + OSC 9
+  escape sequences to the claude process's terminal device (found by
+  walking the process tree — the statusline itself is spawned without a
+  controlling tty). The escape rides the pty byte stream back to your
+  **local** terminal emulator, and *it* raises the desktop
+  notification. kitty, WezTerm, Ghostty, foot and urxvt speak OSC 777;
+  iTerm2 speaks OSC 9; Apple Terminal speaks neither. Terminals that
+  speak both dialects may notify twice on `osc` — pin `osc777` or `osc9`
+  via `CLAUDE_STATUSLINE_NOTIFY`. Inside tmux the escape is
+  passthrough-wrapped, which needs `set -g allow-passthrough on`
+  (tmux ≥ 3.3).
+- Ticking while idle relies on the `statusLine.refreshInterval` the
+  installer writes (2 s); without it the statusline only re-runs on
+  message events and the countdown would go stale between them.
+
+| Env var | Effect |
+|---|---|
+| `CLAUDE_STATUSLINE_CACHE_TTL` | Cache TTL in seconds, overriding auto-detection; `0` hides the segment. |
+| `CLAUDE_STATUSLINE_CACHE_WARN` | Warn threshold in seconds — at or below it the countdown turns yellow (red under half of it) and the notification fires; `0` disables the notification. Default 60, or 300 when the detected TTL is 1 h. |
+| `CLAUDE_STATUSLINE_NOTIFY` | Delivery method: `auto` (default), `osascript`, `notify-send`, `osc` (both escape dialects), `osc777`, `osc9`, or `off`. `auto` picks `osc` when the session is remote (ssh), otherwise the first available local mechanism. |
+
 ## Installer behavior
 
 - **Idempotent.** Re-running the installer on a machine that's already set
@@ -110,6 +160,12 @@ is removed. `~/.local/bin-wrap/` is removed only if it's empty.
 - python3 (for `claudet`)
 - `readlink -f` (present on Linux, and on macOS 12.3+)
 - jq (used by the statusline; pre-installed on macOS, `apt install jq` on Debian/Ubuntu)
+- desktop notifications for the cache-TTL warning use `osascript` (built
+  into macOS) or `notify-send` (Linux; `apt install libnotify-bin`); over
+  ssh they use OSC escape sequences instead, which need a supporting
+  *local* terminal (kitty / WezTerm / Ghostty / foot / urxvt / iTerm2 —
+  not Apple Terminal). If nothing suitable is present, the countdown
+  still renders and only the notification is skipped.
 - **git ≥ 2.38** for the statusline's merge-preview indicator (`⚠` / `✓`).
   Older git silently skips the feature and shows just `+N/-M`. Debian 12
   and macOS Ventura (13) and later ship a new-enough git; Debian 11 does
