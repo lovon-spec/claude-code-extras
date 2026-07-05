@@ -3,8 +3,8 @@
 #  statusline-command.sh — Claude Code statusLine renderer
 # =============================================================================
 #
-#  Renders: user@host : cwd ●N [model] █░░ 30% +N/-M ✓ ⇡n main⇡m ⏳4:32
-#           YYYY-mm-dd HH:MM:SS ABCD1234
+#  Renders: user@host : cwd ●N [model] █░░ 30% +N/-M ✓ ⇡n main⇡m ⚡99% ⏳4:32
+#           5h17% 7d22% YYYY-mm-dd HH:MM:SS ABCD1234
 #
 #  Also writes the current session's transcript_path to
 #      $XDG_CACHE_HOME/claude-sessions/<claude-pid>
@@ -20,6 +20,21 @@ model=$(echo "$input" | jq -r '.model.display_name // .model.id // "unknown"')
 used_pct=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
 session_id=$(echo "$input" | jq -r '.session_id // empty')
 transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
+
+# Cache + rate-limit numbers in one jq pass; -1 marks "not provided" (older
+# Claude Code versions, or no API request yet this session). All values are
+# integers, so unquoted set-splitting of the @tsv output is safe.
+set -- $(echo "$input" | jq -r '[
+    (.context_window.current_usage.cache_read_input_tokens // -1),
+    (.context_window.current_usage.cache_creation_input_tokens // -1),
+    (.context_window.current_usage.input_tokens // -1),
+    (.rate_limits.five_hour.used_percentage // -1),
+    (.rate_limits.five_hour.resets_at // -1),
+    (.rate_limits.seven_day.used_percentage // -1),
+    (.rate_limits.seven_day.resets_at // -1)
+  ] | @tsv' 2>/dev/null)
+cu_read=${1:--1} cu_create=${2:--1} cu_input=${3:--1}
+rl5_pct=${4:--1} rl5_reset=${5:--1} rl7_pct=${6:--1} rl7_reset=${7:--1}
 
 # --- Record current session for claudet auto-detection ----------------------
 # Claude Code spawns the statusline as: claude -> sh -c -> bash -> script,
@@ -237,10 +252,13 @@ fi
 #   TTL       = the most recent nonzero ephemeral_{5m,1h} cache-creation
 #               entry in the transcript tail (1h → 3600s, else 300s).
 # Rendered as:
+#   ⚡99%    cache-hit ratio of the latest request (green ≥90, yellow ≥50,
+#            red below — 0% = full re-write; normal on a session's first
+#            request)
 #   ⏳54:07  time left — green, yellow under WARN, red under WARN/2
 #   ⏳✗      dim: cache has gone cold; the next message pays full price
 # Knobs (environment):
-#   CLAUDE_STATUSLINE_CACHE_TTL   seconds; 0 hides the segment entirely
+#   CLAUDE_STATUSLINE_CACHE_TTL   seconds; 0 hides ⚡ and ⏳ entirely
 #                                 (default: auto-detect as above)
 #   CLAUDE_STATUSLINE_CACHE_WARN  warn threshold in seconds; 0 disables the
 #                                 desktop notification (default: 60, or 300
@@ -248,12 +266,16 @@ fi
 cache_ttl=${CLAUDE_STATUSLINE_CACHE_TTL:-}
 case "$cache_ttl" in *[!0-9]*) cache_ttl="" ;; esac
 ttl_remaining=""
+hit_pct=""
 if [ "$cache_ttl" != "0" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+  # One tail read feeds the TTL-flavor detection, the freshness probe and
+  # the cache hit-ratio fallback below.
+  transcript_tail=$(tail -c 262144 "$transcript_path" 2>/dev/null)
+  ttl_dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline-ttl"
   if [ -z "$cache_ttl" ]; then
-    ttl_dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline-ttl"
     ttl_cache_file=""
     [ -n "$session_id" ] && ttl_cache_file="$ttl_dir/$session_id.ttl"
-    ttl_seen=$(tail -c 262144 "$transcript_path" 2>/dev/null \
+    ttl_seen=$(printf '%s' "$transcript_tail" \
       | grep -o '"ephemeral_[15][mh]_input_tokens":[1-9][0-9]*' | tail -1)
     case "$ttl_seen" in
       *ephemeral_1h*) cache_ttl=3600 ;;
@@ -278,16 +300,96 @@ if [ "$cache_ttl" != "0" ] && [ -n "$transcript_path" ] && [ -f "$transcript_pat
   if [ -z "$cache_warn" ]; then
     if [ "$cache_ttl" -gt 300 ]; then cache_warn=300; else cache_warn=60; fi
   fi
-  # GNU stat (-c) first, BSD/macOS stat (-f) second. The order matters: GNU
-  # stat also accepts -f, but as *filesystem* status — it would succeed and
-  # return garbage, poisoning the fallback chain if tried first.
-  t_mtime=$(stat -c %Y "$transcript_path" 2>/dev/null \
-    || stat -f %m "$transcript_path" 2>/dev/null)
-  case "$t_mtime" in ''|*[!0-9]*) t_mtime="" ;; esac
-  if [ -n "$t_mtime" ]; then
-    ttl_remaining=$((cache_ttl - ($(date +%s) - t_mtime)))
+  # Freshness = timestamp of the last usage-bearing record, NOT the file
+  # mtime: Claude Code appends bookkeeping to idle transcripts (e.g.
+  # away_summary system records), which would keep resetting the countdown
+  # while the real cache decays. Records carrying cache_read_input_tokens
+  # are actual API responses; escaped copies inside tool-result strings
+  # don't match the unescaped pattern. The verdict is cached per session
+  # (.act) for ticks where one huge tool result fills the whole tail
+  # window; file mtime is the last resort for transcripts that predate
+  # usage records.
+  act_file=""
+  [ -n "$session_id" ] && act_file="$ttl_dir/$session_id.act"
+  api_ts=$(printf '%s' "$transcript_tail" | grep '"cache_read_input_tokens"' \
+    | tail -1 | grep -o '"timestamp":"[^"]*"' | tail -1)
+  api_ts=${api_ts#*:\"}
+  api_ts=${api_ts%\"}
+  t_api=""
+  if [ -n "$api_ts" ]; then
+    api_s=${api_ts%%.*}
+    api_s=${api_s%Z}
+    # GNU date (-d) first, BSD/macOS date (-j -f) second, same reasoning
+    # as the stat fallback below.
+    t_api=$(date -u -d "${api_s}Z" +%s 2>/dev/null \
+      || date -j -u -f '%Y-%m-%dT%H:%M:%S' "$api_s" +%s 2>/dev/null)
+    case "$t_api" in ''|*[!0-9]*) t_api="" ;; esac
+  fi
+  if [ -n "$t_api" ]; then
+    if [ -n "$act_file" ] && [ "$(cat "$act_file" 2>/dev/null)" != "$t_api" ]; then
+      mkdir -p "$ttl_dir"
+      printf '%s' "$t_api" > "$act_file"
+    fi
+  elif [ -n "$act_file" ]; then
+    t_api=$(cat "$act_file" 2>/dev/null)
+    case "$t_api" in ''|*[!0-9]*) t_api="" ;; esac
+  fi
+  if [ -z "$t_api" ]; then
+    # GNU stat (-c) first, BSD/macOS stat (-f) second. The order matters:
+    # GNU stat also accepts -f, but as *filesystem* status — it would
+    # succeed and return garbage, poisoning the fallback chain if tried
+    # first.
+    t_api=$(stat -c %Y "$transcript_path" 2>/dev/null \
+      || stat -f %m "$transcript_path" 2>/dev/null)
+    case "$t_api" in ''|*[!0-9]*) t_api="" ;; esac
+  fi
+  if [ -n "$t_api" ]; then
+    ttl_remaining=$((cache_ttl - ($(date +%s) - t_api)))
     [ "$ttl_remaining" -lt 0 ] && ttl_remaining=0
   fi
+
+  # Cache hit ratio of the most recent API request: the share of the prompt
+  # that was read from cache rather than re-written (cache_creation) or sent
+  # uncached (input). ⚡99% green after a warm turn is the "the cache
+  # actually hit" receipt; ⚡0% red is a cold re-write (normal on the very
+  # first request of a session, expensive mid-session). Primary source is
+  # context_window.current_usage from the statusline JSON; older Claude
+  # Code versions without it fall back to the last usage entry in the
+  # transcript tail (the leading quote in the "input_tokens" pattern
+  # anchors it so it can't match inside the longer cache_* field names, and
+  # escaped copies inside string values (\"...\") don't match either).
+  if [ "$cu_read" -lt 0 ] || [ "$cu_create" -lt 0 ] || [ "$cu_input" -lt 0 ]; then
+    cu_read=$(printf '%s' "$transcript_tail" \
+      | grep -o '"cache_read_input_tokens":[0-9][0-9]*' | tail -1)
+    cu_create=$(printf '%s' "$transcript_tail" \
+      | grep -o '"cache_creation_input_tokens":[0-9][0-9]*' | tail -1)
+    cu_input=$(printf '%s' "$transcript_tail" \
+      | grep -o '"input_tokens":[0-9][0-9]*' | tail -1)
+    cu_read=${cu_read##*:} cu_create=${cu_create##*:} cu_input=${cu_input##*:}
+  fi
+  hit_ok=1
+  for _v in "$cu_read" "$cu_create" "$cu_input"; do
+    case "$_v" in ''|*[!0-9]*) hit_ok=0 ;; esac
+  done
+  if [ "$hit_ok" = 1 ]; then
+    hit_total=$((cu_read + cu_create + cu_input))
+    if [ "$hit_total" -gt 0 ]; then
+      hit_pct=$((cu_read * 100 / hit_total))
+    fi
+  fi
+fi
+
+# ⚡ cache-hit receipt for the latest request, rendered next to the ⏳ so
+# the two tell one story: "will my next message hit?" and "did my last one?"
+if [ -n "$hit_pct" ]; then
+  if [ "$hit_pct" -ge 90 ]; then
+    hit_color='00;32'
+  elif [ "$hit_pct" -ge 50 ]; then
+    hit_color='00;33'
+  else
+    hit_color='01;31'
+  fi
+  printf ' \033[%sm⚡%s%%\033[00m' "$hit_color" "$hit_pct"
 fi
 
 if [ -n "$ttl_remaining" ]; then
@@ -304,6 +406,35 @@ if [ -n "$ttl_remaining" ]; then
   else
     printf ' \033[00;90m⏳✗\033[00m'
   fi
+fi
+
+# --- Subscription rate-limit gauges ------------------------------------------
+# 5-hour and 7-day window utilization from the statusline JSON (subscription
+# plans). Dim while comfortable, yellow ≥ 70%, red ≥ 90%; at red the reset
+# countdown is appended (e.g. 5h94%(1h40)) so you know when the window frees
+# up. Hidden entirely when the JSON has no rate_limits (API billing) or
+# CLAUDE_STATUSLINE_RATE_LIMITS=0.
+if [ "${CLAUDE_STATUSLINE_RATE_LIMITS:-1}" != "0" ]; then
+  rl_render() {  # $1 label, $2 used_percentage, $3 resets_at epoch
+    [ "$2" -ge 0 ] 2>/dev/null || return 0
+    if [ "$2" -ge 90 ]; then
+      _rlc='01;31'
+    elif [ "$2" -ge 70 ]; then
+      _rlc='00;33'
+    else
+      _rlc='00;90'
+    fi
+    printf ' \033[%sm%s%s%%' "$_rlc" "$1" "$2"
+    if [ "$2" -ge 90 ] && [ "$3" -gt 0 ] 2>/dev/null; then
+      _rll=$(( $3 - $(date +%s) ))
+      if [ "$_rll" -gt 0 ]; then
+        printf '(%dh%02d)' $((_rll / 3600)) $((_rll % 3600 / 60))
+      fi
+    fi
+    printf '\033[00m'
+  }
+  rl_render 5h "$rl5_pct" "$rl5_reset"
+  rl_render 7d "$rl7_pct" "$rl7_reset"
 fi
 
 printf ' \033[00;90m%s\033[00m' "$(date '+%Y-%m-%d %H:%M:%S')"
@@ -350,8 +481,8 @@ if [ -n "$ttl_remaining" ] && [ "$ttl_remaining" -gt 0 ] \
   ttl_mark_dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline-ttl"
   mkdir -p "$ttl_mark_dir"
   ttl_mark_file="$ttl_mark_dir/$session_id"
-  if [ "$(cat "$ttl_mark_file" 2>/dev/null)" != "$t_mtime" ]; then
-    printf '%s' "$t_mtime" > "$ttl_mark_file"
+  if [ "$(cat "$ttl_mark_file" 2>/dev/null)" != "$t_api" ]; then
+    printf '%s' "$t_api" > "$ttl_mark_file"
     # Markers are ~10 bytes each; prune ones from long-dead sessions. (A
     # live session idle >1 day has an expired cache, which the -gt 0 guard
     # above already silences — losing its marker re-notifies nobody.)

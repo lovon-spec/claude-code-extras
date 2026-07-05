@@ -17,9 +17,11 @@ This repo bundles:
 - a **statusline** that renders cwd, model, context-window usage with a
   progress bar, git ahead/behind vs. the primary branch, a **merge
   preview** (✓ clean / ⚠ would conflict) cached by commit SHA, a
-  **prompt-cache TTL countdown** (⏳54:07) with a desktop notification
-  before the cache goes cold, a clock, and the first 8 chars of the
-  session id (install is opt-out via `--no-statusline`);
+  **cache-hit receipt** (⚡99%) for the latest request, a **prompt-cache
+  TTL countdown** (⏳54:07) with a desktop notification before the cache
+  goes cold, **subscription rate-limit gauges** (5h17% 7d22%), a clock,
+  and the first 8 chars of the session id (install is opt-out via
+  `--no-statusline`);
 - an idempotent **`install.sh`** / **`uninstall.sh`** pair that's safe to
   run on a machine with an existing Claude Code setup.
 
@@ -96,10 +98,13 @@ so a quick message can keep the cache warm.
 
 Claude Code doesn't expose cache state, so the script infers it:
 
-- **Freshness** comes from the transcript's mtime: the session JSONL is
-  appended on every turn and goes quiet exactly when the session idles.
-  (The countdown also runs during a single long tool call — correctly so:
-  no API request is in flight then, and the cache really is decaying.)
+- **Freshness** comes from the timestamp of the transcript's most recent
+  *usage-bearing* record — an actual API response — not from the file's
+  mtime: Claude Code appends bookkeeping to idle transcripts (away-summary
+  system records and the like) that would otherwise keep resetting the
+  countdown while the real cache decays. (The countdown also runs during a
+  single long tool call — correctly so: no API request is in flight then,
+  and the cache really is decaying.)
 - **TTL** is auto-detected from the most recent nonzero
   `ephemeral_{5m,1h}_input_tokens` cache-creation entry in the transcript
   tail, so it tracks whatever your plan / env vars actually negotiated
@@ -128,11 +133,30 @@ Claude Code doesn't expose cache state, so the script infers it:
   installer writes (2 s); without it the statusline only re-runs on
   message events and the countdown would go stale between them.
 
+Next to the countdown, **⚡99% is the receipt** that the cache actually
+did its job: the share of the latest request's prompt that was *read*
+from cache rather than re-written (`cache_creation`) or sent uncached.
+Green ≥ 90 %, yellow ≥ 50 %, red below — ⚡0 % is a full re-write, which
+is normal on a session's first request and a silent money-burner
+mid-session. It comes from `context_window.current_usage` in the
+statusline JSON, falling back to the transcript's last usage record on
+older Claude Code versions. So after coming back to an idle session:
+⏳ told you whether the cache *should* hit, and ⚡ tells you whether it
+*did*.
+
+The statusline also renders the **subscription rate-limit windows**
+(`rate_limits` in the statusline JSON): `5h17% 7d22%` = 17 % of the
+5-hour window and 22 % of the 7-day window used. Dim while comfortable,
+yellow at ≥ 70 %, red at ≥ 90 % — and at red the reset countdown is
+appended (`5h94%(1h40)`). Hidden on API-key billing, where the field
+isn't provided.
+
 | Env var | Effect |
 |---|---|
-| `CLAUDE_STATUSLINE_CACHE_TTL` | Cache TTL in seconds, overriding auto-detection; `0` hides the segment. |
+| `CLAUDE_STATUSLINE_CACHE_TTL` | Cache TTL in seconds, overriding auto-detection; `0` hides both the ⚡ and ⏳ segments. |
 | `CLAUDE_STATUSLINE_CACHE_WARN` | Warn threshold in seconds — at or below it the countdown turns yellow (red under half of it) and the notification fires; `0` disables the notification. Default 60, or 300 when the detected TTL is 1 h. |
 | `CLAUDE_STATUSLINE_NOTIFY` | Delivery method(s), space-separable: `auto` (default), `osascript`, `notify-send`, `osc` (both escape dialects), `osc777`, `osc9`, `bell`, `off`. `auto` picks `osc bell` for remote sessions, otherwise the first available local mechanism. |
+| `CLAUDE_STATUSLINE_RATE_LIMITS` | `0` hides the 5h/7d rate-limit gauges. |
 
 ## Installer behavior
 
