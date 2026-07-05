@@ -4,15 +4,14 @@
 # =============================================================================
 #
 #  Removes:
-#    ~/.local/bin-wrap/claude
 #    ~/.local/bin/claudet
-#    ~/.cache/claude-wrapper.flag
+#    ~/.claude/statusline-command.sh + its settings.json block (see below)
+#    the statusline cache dirs under ~/.cache/
 #    the claude-code-extras marker block from your shell rc file
 #
 #  Leaves alone:
 #    - Any file with a .bak-<timestamp> suffix (your previous contents).
-#    - Anything under ~/.claude/ or ~/.local/share/claude/.
-#    - ~/.local/bin-wrap/ if other files remain in it.
+#    - Anything else under ~/.claude/ or ~/.local/share/claude/.
 #    - ~/.local/bin/ (always shared with other tools).
 # =============================================================================
 
@@ -84,9 +83,7 @@ remove_file() {
   fi
 }
 
-remove_file "$HOME/.local/bin-wrap/claude"
 remove_file "$HOME/.local/bin/claudet"
-remove_file "${XDG_CACHE_HOME:-$HOME/.cache}/claude-wrapper.flag"
 
 # ---- optional: statusline script + settings.json rollback ------------------
 if (( REMOVE_STATUSLINE )); then
@@ -109,12 +106,15 @@ if (( REMOVE_STATUSLINE )); then
   unmerge_args=(remove-statusline --settings "$SETTINGS" --command "$STATUSLINE_CMD")
   (( DRY_RUN )) && unmerge_args+=(--dry-run)
   python3 "$REPO_DIR/tools/settings.py" "${unmerge_args[@]}"
-fi
 
-# rmdir bin-wrap only if empty (user may have their own files there).
-if [[ -d "$HOME/.local/bin-wrap" ]] && [[ -z "$(ls -A "$HOME/.local/bin-wrap" 2>/dev/null)" ]]; then
-  run rmdir "$HOME/.local/bin-wrap"
-  (( DRY_RUN )) || log "removed empty dir $HOME/.local/bin-wrap"
+  # Caches the statusline maintains; all regenerable, so removal is safe.
+  for d in claude-sessions claude-statusline-ttl claude-statusline-merge; do
+    cache="${XDG_CACHE_HOME:-$HOME/.cache}/$d"
+    if [[ -d $cache ]]; then
+      run rm -rf "$cache"
+      (( DRY_RUN )) || log "removed cache $cache"
+    fi
+  done
 fi
 
 # Remove the marker block from rc.
