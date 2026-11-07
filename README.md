@@ -17,6 +17,8 @@ This repo bundles:
   goes cold, **subscription rate-limit gauges** (5h17% 7d22%), a clock,
   and the first 8 chars of the session id (install is opt-out via
   `--no-statusline`);
+- **desktop-statusline**, the same line for the Code tab of the Claude
+  desktop app, as a plugin ([see below](#desktop-app));
 - a **`claudet`** command that pulls thinking blocks out of the current
   session's JSONL log — because the TUI's Ctrl+O only shows the most recent
   one, and older summaries are overwritten as new ones stream in;
@@ -155,6 +157,33 @@ isn't provided.
 | `CLAUDE_STATUSLINE_NOTIFY` | Delivery method(s), space-separable: `auto` (default), `osascript`, `notify-send`, `osc` (both escape dialects), `osc777`, `osc9`, `bell`, `off`. `auto` picks `osc bell` for remote sessions, otherwise the first available local mechanism. |
 | `CLAUDE_STATUSLINE_RATE_LIMITS` | `0` hides the 5h/7d rate-limit gauges. |
 
+## Desktop app
+
+`plugins/desktop-statusline` shows the same line in the Code tab of the
+Claude desktop app, in a band above the message box. It is a Claude Code
+plugin rather than a script, so `install.sh` doesn't touch it. In the app,
+click **+** next to the prompt box, then **Plugins**, **Add marketplace**
+with `lovon-spec/claude-code-extras`, then **Add plugin**. Or from a shell:
+
+```bash
+claude plugin install desktop-statusline --marketplace lovon-spec/claude-code-extras
+```
+
+It draws on the desktop app only, so terminal sessions keep the script
+above. Tested on macOS with Claude Code v2.1.317. It differs from the script
+in a few ways:
+
+- **Countdown.** Plugins can't read the CLI's cache expiry time, so ⏳ is the
+  last main-conversation response plus the TTL detected from the transcript's
+  cache writes. It can differ slightly from the terminal's.
+- **Notification.** The expiry warning uses `osascript` on macOS. Where that
+  isn't available, it shows a message inside the app instead.
+- **Problems are visible.** A figure that can't be read ends the line with
+  `⚠` and the reason.
+- **Left out.** The `CLAUDE_STATUSLINE_*` variables don't apply, and the
+  plugin doesn't write the `claude-sessions` cache, so `claudet` needs
+  `-s <prefix>` for a desktop session.
+
 ## Installer behavior
 
 - **Idempotent.** Re-running on an up-to-date machine is a no-op.
@@ -188,6 +217,12 @@ Code or network required. Covers TTL auto-detection and env overrides,
 the idle-transcript bookkeeping regression, ⚡ hit-ratio extraction and
 fallback, rate-limit gauges (including float `used_percentage`),
 notification-marker lifecycle, and malformed-input resilience.
+
+The desktop plugin has its own suite:
+
+```bash
+claude plugin test plugins/desktop-statusline
+```
 
 ## Requirements
 

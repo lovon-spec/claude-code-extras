@@ -1,0 +1,10 @@
+{
+  "name": "desktop-statusline",
+  "version": "0.1.0",
+  "description": "The Claude Code CLI statusline for the desktop app's Code tab: git state, model, context, prompt cache countdown, rate limits, clock and session id.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "lovon-spec"
+  },
+  "repository": "https://github.com/lovon-spec/claude-code-extras"
+}

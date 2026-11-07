@@ -1,0 +1,12 @@
+{
+  "name": "claude-code-extras",
+  "description": "Quality-of-life extras for Claude Code.",
+  "owner": { "name": "lovon-spec" },
+  "plugins": [
+    {
+      "name": "desktop-statusline",
+      "source": "./plugins/desktop-statusline",
+      "description": "The claude-code-extras statusline for the Code tab of the Claude desktop app."
+    }
+  ]
+}
